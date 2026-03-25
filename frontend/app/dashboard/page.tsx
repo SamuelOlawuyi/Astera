@@ -16,6 +16,10 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
+  const [sort, setSort] = useState<SortOption>("newest");
+
   useEffect(() => {
     if (!wallet.connected) {
       setLoading(false);
@@ -67,6 +71,42 @@ export default function DashboardPage() {
     defaulted: invoices.filter((i) => i.status === 'Defaulted').length,
     totalVolume: invoices.reduce((acc, i) => acc + i.amount, 0n),
   };
+
+  const filtered = useMemo(() => {
+    let result = [...invoices];
+
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      result = result.filter(
+        (inv) =>
+          inv.debtor.toLowerCase().includes(q) ||
+          inv.description.toLowerCase().includes(q)
+      );
+    }
+
+    if (statusFilter !== "All") {
+      result = result.filter((inv) => inv.status === statusFilter);
+    }
+
+    switch (sort) {
+      case "newest":
+        result.sort((a, b) => b.createdAt - a.createdAt);
+        break;
+      case "oldest":
+        result.sort((a, b) => a.createdAt - b.createdAt);
+        break;
+      case "highest":
+        result.sort((a, b) => (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0));
+        break;
+      case "due-soonest":
+        result.sort((a, b) => a.dueDate - b.dueDate);
+        break;
+    }
+
+    return result;
+  }, [invoices, search, statusFilter, sort]);
+
+  const isFiltered = search.trim() !== "" || statusFilter !== "All";
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-6">
@@ -120,6 +160,70 @@ export default function DashboardPage() {
               {/* Invoices */}
               <div>
                 <h2 className="text-lg font-semibold mb-4">Your Invoices</h2>
+
+                {/* Search */}
+                <div className="relative mb-3">
+                  <svg
+                    className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-muted pointer-events-none"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z"
+                    />
+                  </svg>
+                  <input
+                    type="text"
+                    placeholder="Search by debtor or description..."
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    className="w-full bg-brand-dark border border-brand-border rounded-xl pl-9 pr-4 py-2.5 text-sm text-white placeholder-brand-muted focus:outline-none focus:border-brand-gold"
+                  />
+                  {search && (
+                    <button
+                      onClick={() => setSearch("")}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-brand-muted hover:text-white"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                {/* Status tabs + Sort */}
+                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+                  <div className="flex gap-1 flex-wrap">
+                    {STATUS_TABS.map((tab) => (
+                      <button
+                        key={tab}
+                        onClick={() => setStatusFilter(tab)}
+                        className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                          statusFilter === tab
+                            ? "bg-brand-gold text-brand-dark"
+                            : "text-brand-muted hover:text-white bg-brand-card border border-brand-border"
+                        }`}
+                      >
+                        {tab}
+                      </button>
+                    ))}
+                  </div>
+
+                  <select
+                    value={sort}
+                    onChange={(e) => setSort(e.target.value as SortOption)}
+                    className="bg-brand-dark border border-brand-border rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-gold cursor-pointer"
+                  >
+                    {SORT_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 {loading ? (
                   <div className="space-y-4">
                     {[1, 2, 3].map((n) => (
@@ -142,6 +246,18 @@ export default function DashboardPage() {
                     >
                       Create your first invoice →
                     </Link>
+                  </div>
+                ) : filtered.length === 0 ? (
+                  <div className="p-12 bg-brand-card border border-brand-border rounded-2xl text-center">
+                    <p className="text-brand-muted mb-3">No invoices match your filters.</p>
+                    {isFiltered && (
+                      <button
+                        onClick={() => { setSearch(""); setStatusFilter("All"); }}
+                        className="text-brand-gold hover:underline text-sm font-medium"
+                      >
+                        Clear filters
+                      </button>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-4">
