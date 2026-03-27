@@ -148,14 +148,12 @@ export async function buildDepositTx(investor: string, amount: bigint): Promise<
   return prepared.toXDR();
 }
 
-export async function getFundedInvoice(
-  invoiceId: number
-): Promise<FundedInvoice | null> {
+export async function getFundedInvoice(invoiceId: number): Promise<FundedInvoice | null> {
   const sim = await simulateTx(
     POOL_CONTRACT_ID,
-    "get_funded_invoice",
-    [nativeToScVal(invoiceId, { type: "u64" })],
-    "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN"
+    'get_funded_invoice',
+    [nativeToScVal(invoiceId, { type: 'u64' })],
+    'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
   );
 
   const result = (sim as StellarRpc.Api.SimulateTransactionSuccessResponse).result;
@@ -190,13 +188,13 @@ export async function buildInitCoFundingTx(params: {
   })
     .addOperation(
       contract.call(
-        "init_co_funding",
+        'init_co_funding',
         new Address(params.admin).toScVal(),
-        nativeToScVal(params.invoiceId, { type: "u64" }),
-        nativeToScVal(params.principal, { type: "i128" }),
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        nativeToScVal(params.principal, { type: 'i128' }),
         new Address(params.sme).toScVal(),
-        nativeToScVal(params.dueDate, { type: "u64" })
-      )
+        nativeToScVal(params.dueDate, { type: 'u64' }),
+      ),
     )
     .setTimeout(30)
     .build();
@@ -224,11 +222,11 @@ export async function buildCommitToInvoiceTx(params: {
   })
     .addOperation(
       contract.call(
-        "commit_to_invoice",
+        'commit_to_invoice',
         new Address(params.investor).toScVal(),
-        nativeToScVal(params.invoiceId, { type: "u64" }),
-        nativeToScVal(params.amount, { type: "i128" })
-      )
+        nativeToScVal(params.invoiceId, { type: 'u64' }),
+        nativeToScVal(params.amount, { type: 'i128' }),
+      ),
     )
     .setTimeout(30)
     .build();
@@ -255,6 +253,65 @@ export async function buildWithdrawTx(investor: string, amount: bigint): Promise
         'withdraw',
         new Address(investor).toScVal(),
         nativeToScVal(amount, { type: 'i128' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+export async function buildSetYieldTx(admin: string, yieldBps: number): Promise<string> {
+  const account = await rpc.getAccount(admin);
+  const contract = new Contract(POOL_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'set_yield',
+        new Address(admin).toScVal(),
+        nativeToScVal(yieldBps, { type: 'u32' }),
+      ),
+    )
+    .setTimeout(30)
+    .build();
+
+  const sim = await rpc.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(sim)) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const prepared = StellarRpc.assembleTransaction(tx, sim).build();
+  return prepared.toXDR();
+}
+
+/**
+ * NOTE: mark_defaulted currently requires pool.require_auth() in the Invoice contract.
+ * Since the Pool contract lacks a wrapper, this call may fail from a standard admin wallet
+ * unless the contract admin is also the pool address stored in the invoice.
+ */
+export async function buildMarkDefaultedTx(admin: string, invoiceId: number): Promise<string> {
+  const account = await rpc.getAccount(admin);
+  const contract = new Contract(INVOICE_CONTRACT_ID);
+
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK,
+  })
+    .addOperation(
+      contract.call(
+        'mark_defaulted',
+        nativeToScVal(invoiceId, { type: 'u64' }),
+        new Address(POOL_CONTRACT_ID).toScVal(), // Attempting with Pool contract ID
       ),
     )
     .setTimeout(30)
