@@ -1,512 +1,547 @@
-# Funding Pool Contract
+# Funding Pool Contract — API Documentation
+
+Soroban smart contract for pooled invoice funding on Stellar. Investors deposit accepted stablecoins, co-fund invoices, and earn time-based yield on repayments.
+
+---
 
 ## Overview
 
-The Funding Pool Contract enables investors to pool USDC capital and co-fund invoices created by SMEs. It manages deposits, withdrawals, invoice funding commitments, repayments, and yield distribution. Multiple investors can participate in funding a single invoice, with yields distributed proportionally based on their contribution.
+The Funding Pool enables:
 
-## Contract Purpose
+- **Multi-token support** — admin can whitelist multiple stablecoins (USDC, EURC, etc.)
+- **Co-funding** — multiple investors combine capital to fund a single invoice
+- **Pro-rata yield** — interest distributed proportionally to each co-funder's share
+- **Position tracking** — per-investor, per-token balances and earnings
 
-- Accept USDC deposits from investors
-- Enable co-funding of invoices by multiple investors
-- Disburse funds to SMEs when invoices are fully funded
-- Calculate and distribute time-based yields on repayment
-- Track individual investor positions and earnings
-- Provide liquidity management for the pool
+---
 
 ## Constants
 
-- `DEFAULT_YIELD_BPS`: 800 (8% APY)
-- `BPS_DENOM`: 10,000 (basis points denominator)
-- `SECS_PER_YEAR`: 31,536,000 (365 days)
+| Constant | Value | Description |
+| --- | --- | --- |
+| `DEFAULT_YIELD_BPS` | `800` | Default annual yield (8% APY) |
+| `BPS_DENOM` | `10_000` | Basis points denominator |
+| `SECS_PER_YEAR` | `31_536_000` | Seconds per year (365 days) |
+
+---
 
 ## Data Structures
 
 ### PoolConfig
 
 ```rust
-struct PoolConfig {
-    usdc_token: Address,           // USDC token contract address
-    invoice_contract: Address,     // Invoice contract address
-    admin: Address,                // Pool administrator
-    yield_bps: u32,                // Annual yield in basis points (800 = 8%)
-    total_deposited: i128,         // Total USDC deposited (including earned interest)
-    total_deployed: i128,          // USDC currently deployed in active invoices
-    total_paid_out: i128,          // Total USDC paid out (principal + interest)
+pub struct PoolConfig {
+    pub invoice_contract: Address,  // Invoice contract address
+    pub admin: Address,             // Pool administrator
+    pub yield_bps: u32,             // Annual yield in basis points (800 = 8%)
+}
+```
+
+### PoolTokenTotals
+
+Per-token aggregate statistics.
+
+```rust
+pub struct PoolTokenTotals {
+    pub total_deposited: i128,  // Total deposited (including earned interest)
+    pub total_deployed: i128,   // Currently locked in active invoices
+    pub total_paid_out: i128,   // Total paid out (principal + interest)
 }
 ```
 
 ### InvestorPosition
 
+Per-investor, per-token position tracking.
+
 ```rust
-struct InvestorPosition {
-    deposited: i128,      // Total amount deposited (net of withdrawals)
-    available: i128,      // Undeployed balance available for withdrawal/funding
-    deployed: i128,       // Amount currently locked in active invoices
-    earned: i128,         // Total interest earned
-    deposit_count: u32,   // Number of deposits made
+pub struct InvestorPosition {
+    pub deposited: i128,     // Total amount deposited (net of withdrawals)
+    pub available: i128,     // Undeployed balance available for withdrawal/funding
+    pub deployed: i128,      // Amount locked in active invoices
+    pub earned: i128,        // Total interest earned
+    pub deposit_count: u32,  // Number of deposits made
 }
 ```
 
 ### FundedInvoice
 
+Tracks a single invoice's funding state.
+
 ```rust
-struct FundedInvoice {
-    invoice_id: u64,      // Invoice ID from invoice contract
-    sme: Address,         // SME receiving the funds
-    principal: i128,      // Total funding target
-    committed: i128,      // Amount committed so far (equals principal when fully funded)
-    funded_at: u64,       // Timestamp when fully funded (0 while open)
-    due_date: u64,        // Invoice due date
-    repaid: bool,         // Whether invoice has been repaid
+pub struct FundedInvoice {
+    pub invoice_id: u64,   // Invoice ID from invoice contract
+    pub sme: Address,      // SME receiving the funds
+    pub token: Address,    // Stablecoin used for this invoice
+    pub principal: i128,   // Total funding target
+    pub committed: i128,   // Amount committed so far
+    pub funded_at: u64,    // Timestamp when fully funded (0 while open)
+    pub due_date: u64,     // Invoice due date
+    pub repaid: bool,      // Whether invoice has been repaid
 }
 ```
 
 ### CoFundKey
 
+Composite key for per-investor, per-invoice share records.
+
 ```rust
-struct CoFundKey {
-    invoice_id: u64,
-    investor: Address,
+pub struct CoFundKey {
+    pub invoice_id: u64,
+    pub investor: Address,
 }
 ```
 
-## Storage Keys
+### InvestorTokenKey
 
-- `Config`: Pool configuration (instance storage)
-- `Investor(Address)`: Maps investor address to InvestorPosition (persistent storage)
-- `FundedInvoice(u64)`: Maps invoice ID to FundedInvoice (persistent storage)
-- `CoFunders(u64)`: Vec<Address> of all investors who committed to an invoice (persistent storage)
-- `CoFundShare(CoFundKey)`: i128 principal share committed by specific investor to specific invoice (persistent storage)
-- `Initialized`: Boolean flag indicating contract initialization (instance storage)
+Composite key for per-investor, per-token position records.
+
+```rust
+pub struct InvestorTokenKey {
+    pub investor: Address,
+    pub token: Address,
+}
+```
+
+### DataKey (Storage Keys)
+
+```rust
+pub enum DataKey {
+    Config,                             // Instance: PoolConfig
+    InvestorPosition(InvestorTokenKey),  // Persistent: per-investor, per-token position
+    FundedInvoice(u64),                 // Persistent: per-invoice funding record
+    CoFunders(u64),                     // Persistent: Vec<Address> of co-funders
+    CoFundShare(CoFundKey),             // Persistent: i128 share per investor per invoice
+    AcceptedTokens,                     // Instance: Vec<Address> of whitelisted tokens
+    TokenTotals(Address),               // Instance: per-token PoolTokenTotals
+    Initialized,                        // Instance: initialization flag
+}
+```
+
+---
 
 ## Events
 
-All events are published with topic `POOL`.
+All events use topic prefix `POOL` (via `symbol_short!("POOL")`).
 
-### deposit
-
-- **Data**: `(investor: Address, amount: i128)`
-- **Emitted**: When an investor deposits USDC
-
-### funded
-
-- **Data**: `(invoice_id: u64, sme: Address, principal: i128)`
-- **Emitted**: When an invoice becomes fully funded and USDC is disbursed to SME
-
-### repaid
-
-- **Data**: `(invoice_id: u64, principal: i128, interest: i128)`
-- **Emitted**: When an invoice is repaid with interest
-
-### withdraw
-
-- **Data**: `(investor: Address, amount: i128)`
-- **Emitted**: When an investor withdraws USDC
+| Event | Topic | Data | Emitted When |
+| --- | --- | --- | --- |
+| `deposit` | `(POOL, "deposit")` | `(investor: Address, amount: i128)` | Investor deposits stablecoin |
+| `funded` | `(POOL, "funded")` | `(invoice_id: u64, sme: Address, principal: i128)` | Invoice fully funded; stablecoin disbursed to SME |
+| `repaid` | `(POOL, "repaid")` | `(invoice_id: u64, principal: i128, interest: i128)` | Invoice repaid with interest |
+| `withdraw` | `(POOL, "withdraw")` | `(investor: Address, amount: i128)` | Investor withdraws stablecoin |
 
 ---
 
 ## Public Functions
 
-### initialize(admin: Address, usdc_token: Address, invoice_contract: Address)
+### initialize
 
-Initializes the pool contract. Can only be called once.
+```rust
+pub fn initialize(env: Env, admin: Address, initial_token: Address, invoice_contract: Address)
+```
 
-**Auth:** None (but can only be called once)
+Initializes the pool with an admin, the first accepted stablecoin, and the invoice contract. Can only be called once.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `admin` | `Address` | Protocol administrator |
+| `initial_token` | `Address` | First accepted stablecoin (e.g. USDC) |
+| `invoice_contract` | `Address` | Invoice contract address |
+
+**Auth:** None (single-use)
 
 **Panics:**
-
-- `"already initialized"` - if contract has already been initialized
-
-**Events:** None
+- `"already initialized"` — contract already initialized
 
 **Example:**
-
 ```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <ADMIN_SECRET> \
+stellar contract invoke --id <POOL_ID> --source <ADMIN> \
   -- initialize \
-  --admin <ADMIN_ADDRESS> \
-  --usdc_token <USDC_TOKEN_ADDRESS> \
-  --invoice_contract <INVOICE_CONTRACT_ADDRESS>
+  --admin <ADMIN_ADDR> \
+  --initial_token <USDC_ADDR> \
+  --invoice_contract <INVOICE_ADDR>
 ```
 
 ---
 
-### deposit(investor: Address, amount: i128)
+### add_token
 
-Investor deposits USDC into the pool. USDC is transferred from investor to pool contract.
+```rust
+pub fn add_token(env: Env, admin: Address, token: Address)
+```
 
-**Auth:** `investor` must sign
+Admin whitelists a new stablecoin for the pool.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `admin` | `Address` | Must be pool admin (must sign) |
+| `token` | `Address` | Stablecoin contract to add |
+
+**Auth:** `admin.require_auth()`
 
 **Panics:**
+- `"unauthorized"` — caller is not admin
+- `"token already accepted"` — token is already whitelisted
 
-- `"amount must be positive"` - if amount <= 0
-- `"not initialized"` - if contract not initialized
+---
 
-**Events:** `deposit` with `(investor, amount)`
+### remove_token
+
+```rust
+pub fn remove_token(env: Env, admin: Address, token: Address)
+```
+
+Admin removes a stablecoin from the whitelist. Only allowed if the token has zero balances.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `admin` | `Address` | Must be pool admin (must sign) |
+| `token` | `Address` | Stablecoin contract to remove |
+
+**Auth:** `admin.require_auth()`
+
+**Panics:**
+- `"unauthorized"` — caller is not admin
+- `"token not in whitelist"` — token not found
+- `"token has non-zero pool balances"` — token has active deposits/deployments
+
+---
+
+### deposit
+
+```rust
+pub fn deposit(env: Env, investor: Address, token: Address, amount: i128)
+```
+
+Investor deposits an accepted stablecoin into the pool. Token is transferred from investor to the pool contract.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `investor` | `Address` | Investor wallet (must sign) |
+| `token` | `Address` | Stablecoin to deposit |
+| `amount` | `i128` | Amount in smallest unit (e.g. `1_000_000_000` = 100 USDC) |
+
+**Auth:** `investor.require_auth()`
+
+**Panics:**
+- `"amount must be positive"` — amount ≤ 0
+- `"token not accepted"` — token not in whitelist
+
+**Events:** `deposit` — `(investor, amount)`
 
 **Example:**
-
 ```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <INVESTOR_SECRET> \
+stellar contract invoke --id <POOL_ID> --source <INVESTOR> \
   -- deposit \
-  --investor <INVESTOR_ADDRESS> \
+  --investor <INVESTOR_ADDR> \
+  --token <USDC_ADDR> \
   --amount 1000000000
 ```
 
 ---
 
-### init_co_funding(admin: Address, invoice_id: u64, principal: i128, sme: Address, due_date: u64)
+### init_co_funding
 
-Admin registers an invoice for co-funding, establishing the principal target. Investors then call `commit_to_invoice` to fill their shares.
+```rust
+pub fn init_co_funding(
+    env: Env,
+    admin: Address,
+    invoice_id: u64,
+    principal: i128,
+    sme: Address,
+    due_date: u64,
+    token: Address,
+)
+```
 
-**Auth:** `admin` must sign
+Admin registers an invoice for co-funding in a specific stablecoin. Investors then commit capital via `commit_to_invoice`.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `admin` | `Address` | Pool admin (must sign) |
+| `invoice_id` | `u64` | Invoice ID from the invoice contract |
+| `principal` | `i128` | Total funding target |
+| `sme` | `Address` | SME wallet to receive funds |
+| `due_date` | `u64` | Invoice due date (unix timestamp) |
+| `token` | `Address` | Stablecoin to use for this invoice |
+
+**Auth:** `admin.require_auth()`
 
 **Panics:**
-
-- `"not initialized"` - if contract not initialized
-- `"unauthorized"` - if caller is not admin
-- `"principal must be positive"` - if principal <= 0
-- `"invoice already registered for funding"` - if invoice_id already exists
-
-**Events:** None
+- `"unauthorized"` — caller is not admin
+- `"token not accepted"` — token not in whitelist
+- `"principal must be positive"` — principal ≤ 0
+- `"invoice already registered for funding"` — duplicate invoice_id
 
 **Example:**
-
 ```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <ADMIN_SECRET> \
+stellar contract invoke --id <POOL_ID> --source <ADMIN> \
   -- init_co_funding \
-  --admin <ADMIN_ADDRESS> \
+  --admin <ADMIN_ADDR> \
   --invoice_id 1 \
   --principal 3000000000 \
-  --sme <SME_ADDRESS> \
-  --due_date 1735689600
+  --sme <SME_ADDR> \
+  --due_date 1735689600 \
+  --token <USDC_ADDR>
 ```
 
 ---
 
-### commit_to_invoice(investor: Address, invoice_id: u64, amount: i128)
+### commit_to_invoice
 
-Investor commits a portion of their available pool balance toward an invoice. When the total committed reaches the principal target, USDC is disbursed to the SME and a "funded" event is emitted.
+```rust
+pub fn commit_to_invoice(env: Env, investor: Address, invoice_id: u64, amount: i128)
+```
 
-**Auth:** `investor` must sign
+Investor commits available balance toward funding an invoice. When total committed reaches the principal target, the stablecoin is disbursed to the SME automatically.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `investor` | `Address` | Investor wallet (must sign) |
+| `invoice_id` | `u64` | Invoice to contribute to |
+| `amount` | `i128` | Amount to commit |
+
+**Auth:** `investor.require_auth()`
 
 **Panics:**
+- `"amount must be positive"` — amount ≤ 0
+- `"invoice not registered for co-funding"` — invalid invoice_id
+- `"invoice already fully funded"` — invoice is fully funded
+- `"invoice already repaid"` — invoice has been repaid
+- `"amount exceeds remaining funding gap"` — amount > remaining needed
+- `"investor has no position in this invoice token"` — investor has no deposits in the invoice's token
+- `"insufficient available balance"` — not enough available balance
 
-- `"amount must be positive"` - if amount <= 0
-- `"not initialized"` - if contract not initialized
-- `"invoice not registered for co-funding"` - if invoice_id doesn't exist
-- `"invoice already fully funded"` - if invoice is already fully funded
-- `"invoice already repaid"` - if invoice has been repaid
-- `"amount exceeds remaining funding gap"` - if amount > (principal - committed)
-- `"investor has no position"` - if investor has never deposited
-- `"insufficient available balance"` - if investor's available balance < amount
-
-**Events:** `funded` with `(invoice_id, sme, principal)` when invoice becomes fully funded
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <INVESTOR_SECRET> \
-  -- commit_to_invoice \
-  --investor <INVESTOR_ADDRESS> \
-  --invoice_id 1 \
-  --amount 2000000000
-```
+**Events:** `funded` — `(invoice_id, sme, principal)` when invoice becomes fully funded
 
 ---
 
-### repay_invoice(invoice_id: u64, payer: Address)
+### repay_invoice
 
-SME repays the invoice. Principal and pro-rata yield are credited back to each co-funder's available balance. Interest is calculated based on time elapsed since funding.
+```rust
+pub fn repay_invoice(env: Env, invoice_id: u64, payer: Address)
+```
 
-**Formula:** `interest = (principal × yield_bps × elapsed_seconds) / (10000 × 31536000)`
+SME repays the invoice. The payer transfers `principal + accrued interest` to the pool. Each co-funder's position is credited with their proportional share of principal + interest.
 
-**Auth:** `payer` must sign
+**Interest formula:**
+```
+interest = (principal × yield_bps × elapsed_seconds) / (BPS_DENOM × SECS_PER_YEAR)
+```
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `invoice_id` | `u64` | Invoice to repay |
+| `payer` | `Address` | Wallet paying the repayment (must sign) |
+
+**Auth:** `payer.require_auth()`
 
 **Panics:**
+- `"invoice not found"` — invalid invoice_id
+- `"invoice not fully funded yet"` — invoice hasn't been fully funded
+- `"already repaid"` — invoice already repaid
 
-- `"not initialized"` - if contract not initialized
-- `"invoice not found"` - if invoice_id doesn't exist
-- `"invoice not fully funded yet"` - if invoice hasn't been fully funded
-- `"already repaid"` - if invoice has already been repaid
-
-**Events:** `repaid` with `(invoice_id, principal, interest)`
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <SME_SECRET> \
-  -- repay_invoice \
-  --invoice_id 1 \
-  --payer <SME_ADDRESS>
-```
+**Events:** `repaid` — `(invoice_id, principal, interest)`
 
 ---
 
-### withdraw(investor: Address, amount: i128)
+### withdraw
 
-Investor withdraws their available (undeployed) USDC from the pool.
+```rust
+pub fn withdraw(env: Env, investor: Address, token: Address, amount: i128)
+```
 
-**Auth:** `investor` must sign
+Investor withdraws available (undeployed) balance from the pool.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `investor` | `Address` | Investor wallet (must sign) |
+| `token` | `Address` | Stablecoin to withdraw |
+| `amount` | `i128` | Amount to withdraw |
+
+**Auth:** `investor.require_auth()`
 
 **Panics:**
+- `"amount must be positive"` — amount ≤ 0
+- `"token not accepted"` — token not in whitelist
+- `"no position found"` — investor has no position
+- `"insufficient available balance"` — not enough available balance
 
-- `"amount must be positive"` - if amount <= 0
-- `"not initialized"` - if contract not initialized
-- `"no position found"` - if investor has no position
-- `"insufficient available balance"` - if investor's available balance < amount
-
-**Events:** `withdraw` with `(investor, amount)`
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <INVESTOR_SECRET> \
-  -- withdraw \
-  --investor <INVESTOR_ADDRESS> \
-  --amount 500000000
-```
+**Events:** `withdraw` — `(investor, amount)`
 
 ---
 
-### set_yield(admin: Address, yield_bps: u32)
+### set_yield
 
-Admin updates the pool yield rate (in basis points).
+```rust
+pub fn set_yield(env: Env, admin: Address, yield_bps: u32)
+```
 
-**Auth:** `admin` must sign
+Admin updates the pool's annual yield rate.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `admin` | `Address` | Pool admin (must sign) |
+| `yield_bps` | `u32` | New yield in basis points (e.g. `1000` = 10%) |
+
+**Auth:** `admin.require_auth()`
 
 **Panics:**
-
-- `"not initialized"` - if contract not initialized
-- `"unauthorized"` - if caller is not admin
-- `"yield cannot exceed 50%"` - if yield_bps > 5000
-
-**Events:** None
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <ADMIN_SECRET> \
-  -- set_yield \
-  --admin <ADMIN_ADDRESS> \
-  --yield_bps 1000
-```
+- `"unauthorized"` — caller is not admin
+- `"yield cannot exceed 50%"` — yield_bps > 5000
 
 ---
 
-### get_config() -> PoolConfig
+## Read-Only Functions
+
+### get_config
+
+```rust
+pub fn get_config(env: Env) -> PoolConfig
+```
 
 Returns the pool configuration.
 
-**Auth:** None (read-only)
+**Panics:** `"not initialized"`
+
+---
+
+### accepted_tokens
+
+```rust
+pub fn accepted_tokens(env: Env) -> Vec<Address>
+```
+
+Returns the list of whitelisted stablecoin addresses.
+
+**Panics:** `"not initialized"`
+
+---
+
+### get_token_totals
+
+```rust
+pub fn get_token_totals(env: Env, token: Address) -> PoolTokenTotals
+```
+
+Returns aggregate deposit/deployment/payout totals for a specific token.
+
+---
+
+### get_position
+
+```rust
+pub fn get_position(env: Env, investor: Address, token: Address) -> Option<InvestorPosition>
+```
+
+Returns the investor's position for a specific token. Returns `None` if no position exists.
+
+---
+
+### get_funded_invoice
+
+```rust
+pub fn get_funded_invoice(env: Env, invoice_id: u64) -> Option<FundedInvoice>
+```
+
+Returns funding details for an invoice. Returns `None` if not registered.
+
+---
+
+### get_co_fund_share
+
+```rust
+pub fn get_co_fund_share(env: Env, invoice_id: u64, investor: Address) -> i128
+```
+
+Returns the amount an investor has committed to a specific invoice. Returns `0` if no commitment.
+
+---
+
+### available_liquidity
+
+```rust
+pub fn available_liquidity(env: Env, token: Address) -> i128
+```
+
+Returns undeployed liquidity for a specific token: `total_deposited - total_deployed`.
+
+---
+
+### estimate_repayment
+
+```rust
+pub fn estimate_repayment(env: Env, invoice_id: u64) -> i128
+```
+
+Estimates total repayment amount at the current time (principal + accrued interest).
 
 **Panics:**
-
-- `"not initialized"` - if contract not initialized
-
-**Events:** None
-
-**Returns:** PoolConfig struct
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  -- get_config
-```
+- `"not initialized"` — contract not initialized
+- `"invoice not funded"` — invoice doesn't exist
 
 ---
 
-### get_position(investor: Address) -> Option<InvestorPosition>
+## Error Codes Summary
 
-Returns the position details for a specific investor.
-
-**Auth:** None (read-only)
-
-**Panics:** None
-
-**Events:** None
-
-**Returns:** Option<InvestorPosition> (None if investor has no position)
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  -- get_position \
-  --investor <INVESTOR_ADDRESS>
-```
-
----
-
-### get_funded_invoice(invoice_id: u64) -> Option<FundedInvoice>
-
-Returns details of a funded invoice.
-
-**Auth:** None (read-only)
-
-**Panics:** None
-
-**Events:** None
-
-**Returns:** Option<FundedInvoice> (None if invoice not found)
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  -- get_funded_invoice \
-  --invoice_id 1
-```
+| Error Message | Cause |
+| --- | --- |
+| `"already initialized"` | Contract already initialized |
+| `"not initialized"` | Functions called before initialization |
+| `"unauthorized"` | Caller is not admin |
+| `"amount must be positive"` | Amount ≤ 0 |
+| `"principal must be positive"` | Principal ≤ 0 |
+| `"token already accepted"` | Duplicate token in whitelist |
+| `"token not in whitelist"` | Removing non-existent token |
+| `"token has non-zero pool balances"` | Removing token with active balances |
+| `"token not accepted"` | Using non-whitelisted token |
+| `"invoice already registered for funding"` | Duplicate invoice_id |
+| `"invoice not registered for co-funding"` | Invalid invoice_id |
+| `"invoice already fully funded"` | Committing to fully funded invoice |
+| `"invoice already repaid"` | Committing to repaid invoice |
+| `"amount exceeds remaining funding gap"` | Commitment exceeds remaining needed |
+| `"investor has no position in this invoice token"` | No deposits in the invoice's token |
+| `"insufficient available balance"` | Available balance too low |
+| `"invoice not found"` | Invalid invoice_id in repay |
+| `"invoice not fully funded yet"` | Repaying before fully funded |
+| `"already repaid"` | Duplicate repayment |
+| `"no position found"` | No position for withdrawal |
+| `"yield cannot exceed 50%"` | yield_bps > 5000 |
 
 ---
-
-### get_co_fund_share(invoice_id: u64, investor: Address) -> i128
-
-Returns the USDC amount this investor has committed to a specific invoice.
-
-**Auth:** None (read-only)
-
-**Panics:** None
-
-**Events:** None
-
-**Returns:** i128 (0 if no commitment)
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  -- get_co_fund_share \
-  --invoice_id 1 \
-  --investor <INVESTOR_ADDRESS>
-```
-
----
-
-### available_liquidity() -> i128
-
-Returns available undeployed liquidity in the pool.
-
-**Formula:** `total_deposited - total_deployed`
-
-**Auth:** None (read-only)
-
-**Panics:**
-
-- `"not initialized"` - if contract not initialized
-
-**Events:** None
-
-**Returns:** i128
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  -- available_liquidity
-```
-
----
-
-### estimate_repayment(invoice_id: u64) -> i128
-
-Estimate total repayment for an invoice at current time (principal + accrued interest).
-
-**Auth:** None (read-only)
-
-**Panics:**
-
-- `"not initialized"` - if contract not initialized
-- `"invoice not funded"` - if invoice doesn't exist
-
-**Events:** None
-
-**Returns:** i128 (estimated repayment amount)
-
-**Example:**
-
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  -- estimate_repayment \
-  --invoice_id 1
-```
-
----
-
-## Error Conditions
-
-| Error Message                              | Cause                                        |
-| ------------------------------------------ | -------------------------------------------- |
-| `"already initialized"`                    | Attempting to initialize contract twice      |
-| `"not initialized"`                        | Calling functions before initialization      |
-| `"amount must be positive"`                | Amount parameter <= 0                        |
-| `"unauthorized"`                           | Caller is not admin for admin-only functions |
-| `"principal must be positive"`             | Principal <= 0 in init_co_funding            |
-| `"invoice already registered for funding"` | Duplicate invoice_id in init_co_funding      |
-| `"invoice not registered for co-funding"`  | Invalid invoice_id in commit_to_invoice      |
-| `"invoice already fully funded"`           | Attempting to commit to fully funded invoice |
-| `"invoice already repaid"`                 | Attempting to commit to repaid invoice       |
-| `"amount exceeds remaining funding gap"`   | Commitment exceeds remaining needed amount   |
-| `"investor has no position"`               | Investor never deposited                     |
-| `"insufficient available balance"`         | Investor's available balance too low         |
-| `"invoice not found"`                      | Invalid invoice_id in repay_invoice          |
-| `"invoice not fully funded yet"`           | Attempting to repay before fully funded      |
-| `"already repaid"`                         | Attempting to repay twice                    |
-| `"no position found"`                      | Investor has no position for withdrawal      |
-| `"yield cannot exceed 50%"`                | yield_bps > 5000 in set_yield                |
 
 ## Interest Calculation
 
-Interest is calculated using the formula:
-
 ```
-interest = (principal × yield_bps × elapsed_seconds) / (10000 × 31536000)
+interest = (principal × yield_bps × elapsed_seconds) / (10_000 × 31_536_000)
 ```
 
-Where:
+- `principal` — invoice face value
+- `yield_bps` — annual yield in basis points (e.g. 800 = 8%)
+- `elapsed_seconds` — time between `funded_at` and repayment
+- Interest is distributed proportionally to co-funders based on their share of the principal
 
-- `principal`: Invoice principal amount
-- `yield_bps`: Annual yield in basis points (e.g., 800 = 8%)
-- `elapsed_seconds`: Time between funding and repayment
-- `10000`: Basis points denominator
-- `31536000`: Seconds per year (365 days)
-
-Interest is distributed proportionally to co-funders based on their share of the principal.
+---
 
 ## Co-Funding Workflow
 
-1. Admin calls `init_co_funding` to register an invoice with target principal
-2. Investors call `commit_to_invoice` to commit portions of their available balance
-3. When `committed == principal`, USDC is automatically disbursed to SME
-4. SME calls `repay_invoice` when ready to repay
-5. Principal + proportional interest is credited to each co-funder's available balance
-6. Investors can withdraw their available balance anytime
+```
+1. Admin:    init_co_funding(invoice_id, principal, sme, due_date, token)
+2. Investor: commit_to_invoice(investor, invoice_id, amount)
+   ... repeat until committed == principal ...
+3. Auto:     Stablecoin disbursed to SME; "funded" event emitted
+4. SME:      repay_invoice(invoice_id, payer)
+5. Auto:     Principal + interest credited to each co-funder's available balance
+```
 
-## Integration Notes
-
-- Works with Stellar USDC token (7 decimals: 1 USDC = 10,000,000)
-- Coordinates with Invoice Contract for invoice lifecycle management
-- Supports multiple investors per invoice with proportional yield distribution
-- Investors can participate in multiple invoices simultaneously
-- Available balance can be withdrawn at any time (only deployed capital is locked)
+```
+┌──────────┐     commit_to_invoice()    ┌──────────────┐     repay_invoice()     ┌──────────┐
+│  Open    │ ────────────────────────► │ Fully Funded │ ────────────────────► │  Repaid  │
+│ (co-fund)│  (repeatable by any       └──────────────┘  (principal + yield    └──────────┘
+└──────────┘   investor until full)         │              returned to pool)
+                                            │
+                                            │ Stablecoin auto-transferred
+                                            │ to SME on full commitment
+                                            ▼
+                                       SME receives funds
+```

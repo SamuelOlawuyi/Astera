@@ -20,7 +20,181 @@ export const POOL_CONTRACT_ID = process.env.NEXT_PUBLIC_POOL_CONTRACT_ID ?? '';
 export const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';
 export const EURC_TOKEN_ID = process.env.NEXT_PUBLIC_EURC_TOKEN_ID ?? '';
 
-export const rpc = new StellarRpc.Server(RPC_URL);
+// ---- RPC Connection Pool ----
+
+/** Configuration for the RPC connection pool */
+const RPC_POOL_CONFIG = {
+  /** Maximum number of RPC server instances in the pool */
+  poolSize: 3,
+  /** Health check interval in milliseconds (60 seconds) */
+  healthCheckInterval: 60_000,
+  /** Maximum age of a connection before recycling (5 minutes) */
+  maxConnectionAge: 300_000,
+  /** Request timeout in milliseconds */
+  requestTimeout: 15_000,
+  /** Maximum retry attempts for failed requests */
+  maxRetries: 3,
+  /** Base delay between retries in milliseconds (exponential backoff) */
+  retryBaseDelay: 1_000,
+};
+
+interface PooledConnection {
+  server: StellarRpc.Server;
+  createdAt: number;
+  lastUsed: number;
+  healthy: boolean;
+  inFlightRequests: number;
+}
+
+class RpcConnectionPool {
+  private connections: PooledConnection[] = [];
+  private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor() {
+    this.initPool();
+    this.startHealthChecks();
+  }
+
+  /** Initialize the connection pool with fresh server instances */
+  private initPool(): void {
+    const now = Date.now();
+    for (let i = 0; i < RPC_POOL_CONFIG.poolSize; i++) {
+      this.connections.push({
+        server: new StellarRpc.Server(RPC_URL),
+        createdAt: now,
+        lastUsed: now,
+        healthy: true,
+        inFlightRequests: 0,
+      });
+    }
+  }
+
+  /** Start periodic health checks */
+  private startHealthChecks(): void {
+    // Only run in browser (not during SSR)
+    if (typeof window === 'undefined') return;
+
+    this.healthCheckTimer = setInterval(() => {
+      this.performHealthChecks();
+    }, RPC_POOL_CONFIG.healthCheckInterval);
+  }
+
+  /** Check health of all connections and recycle stale ones */
+  private async performHealthChecks(): Promise<void> {
+    const now = Date.now();
+    for (let i = 0; i < this.connections.length; i++) {
+      const conn = this.connections[i];
+
+      // Recycle connections that are too old
+      if (now - conn.createdAt > RPC_POOL_CONFIG.maxConnectionAge) {
+        this.recycleConnection(i);
+        continue;
+      }
+
+      // Ping the server to check health
+      try {
+        await conn.server.getHealth();
+        conn.healthy = true;
+      } catch {
+        conn.healthy = false;
+        this.recycleConnection(i);
+      }
+    }
+  }
+
+  /** Replace a connection with a fresh one */
+  private recycleConnection(index: number): void {
+    const now = Date.now();
+    this.connections[index] = {
+      server: new StellarRpc.Server(RPC_URL),
+      createdAt: now,
+      lastUsed: now,
+      healthy: true,
+      inFlightRequests: 0,
+    };
+  }
+
+  /**
+   * Get the best available connection from the pool.
+   * Prefers healthy connections with the fewest in-flight requests.
+   */
+  getConnection(): PooledConnection {
+    // Sort by: healthy first, then fewest in-flight requests
+    const sorted = [...this.connections]
+      .filter((c) => c.healthy)
+      .sort((a, b) => a.inFlightRequests - b.inFlightRequests);
+
+    const conn = sorted[0] ?? this.connections[0];
+    conn.lastUsed = Date.now();
+    return conn;
+  }
+
+  /**
+   * Execute an RPC call with automatic retry and connection failover.
+   * Uses exponential backoff between retries.
+   */
+  async execute<T>(fn: (server: StellarRpc.Server) => Promise<T>): Promise<T> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt < RPC_POOL_CONFIG.maxRetries; attempt++) {
+      const conn = this.getConnection();
+      conn.inFlightRequests++;
+
+      try {
+        const result = await Promise.race([
+          fn(conn.server),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error('RPC request timeout')),
+              RPC_POOL_CONFIG.requestTimeout,
+            ),
+          ),
+        ]);
+        conn.inFlightRequests = Math.max(0, conn.inFlightRequests - 1);
+        return result;
+      } catch (err) {
+        conn.inFlightRequests = Math.max(0, conn.inFlightRequests - 1);
+        lastError = err instanceof Error ? err : new Error(String(err));
+
+        // Mark connection as unhealthy on network errors
+        if (
+          lastError.message.includes('timeout') ||
+          lastError.message.includes('fetch') ||
+          lastError.message.includes('network')
+        ) {
+          conn.healthy = false;
+        }
+
+        // Exponential backoff before retry
+        if (attempt < RPC_POOL_CONFIG.maxRetries - 1) {
+          const delay = RPC_POOL_CONFIG.retryBaseDelay * Math.pow(2, attempt);
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+    }
+
+    throw lastError ?? new Error('RPC request failed after retries');
+  }
+
+  /** Clean up timers (for testing or unmounting) */
+  destroy(): void {
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
+  }
+}
+
+/** Singleton RPC connection pool instance */
+const rpcPool = new RpcConnectionPool();
+
+/** Primary RPC server instance (for backward compatibility) */
+export const rpc = rpcPool.getConnection().server;
+
+/** Execute an RPC call with connection pooling, retry, and timeout */
+export const rpcExecute = rpcPool.execute.bind(rpcPool);
+
+// ---- Utility Functions ----
 
 /** Convert USDC amount (human) to stroops (7 decimals) */
 export function toStroops(amount: number): bigint {
@@ -75,44 +249,48 @@ export async function simulateTx(
   args: xdr.ScVal[],
   sourceAddress: string,
 ): Promise<StellarRpc.Api.SimulateTransactionResponse> {
-  const account = await rpc.getAccount(sourceAddress);
-  const contract = new Contract(contractId);
+  return rpcExecute(async (server) => {
+    const account = await server.getAccount(sourceAddress);
+    const contract = new Contract(contractId);
 
-  const tx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: NETWORK,
-  })
-    .addOperation(contract.call(method, ...args))
-    .setTimeout(30)
-    .build();
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK,
+    })
+      .addOperation(contract.call(method, ...args))
+      .setTimeout(30)
+      .build();
 
-  return rpc.simulateTransaction(tx);
+    return server.simulateTransaction(tx);
+  });
 }
 
 /** Submit a signed XDR transaction */
 export async function submitTx(signedXDR: string) {
-  const tx = TransactionBuilder.fromXDR(signedXDR, NETWORK);
-  const response = await rpc.sendTransaction(tx);
+  return rpcExecute(async (server) => {
+    const tx = TransactionBuilder.fromXDR(signedXDR, NETWORK);
+    const response = await server.sendTransaction(tx);
 
-  if (response.status === 'ERROR') {
-    throw new Error(`Transaction failed: ${JSON.stringify(response)}`);
-  }
+    if (response.status === 'ERROR') {
+      throw new Error(`Transaction failed: ${JSON.stringify(response)}`);
+    }
 
-  // Poll for confirmation
-  let result = await rpc.getTransaction(response.hash);
-  let attempts = 0;
+    // Poll for confirmation using the same pooled connection
+    let result = await server.getTransaction(response.hash);
+    let attempts = 0;
 
-  while (result.status === 'NOT_FOUND' && attempts < 20) {
-    await new Promise((r) => setTimeout(r, 1500));
-    result = await rpc.getTransaction(response.hash);
-    attempts++;
-  }
+    while (result.status === 'NOT_FOUND' && attempts < 20) {
+      await new Promise((r) => setTimeout(r, 1500));
+      result = await server.getTransaction(response.hash);
+      attempts++;
+    }
 
-  if (result.status === 'FAILED') {
-    throw new Error('Transaction failed on-chain');
-  }
+    if (result.status === 'FAILED') {
+      throw new Error('Transaction failed on-chain');
+    }
 
-  return result;
+    return result;
+  });
 }
 
 export { nativeToScVal, scValToNative, Address };

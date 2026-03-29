@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useStore } from '@/lib/store';
 import InvoiceCard from '@/components/InvoiceCard';
@@ -24,29 +24,31 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: 'due-soonest', label: 'Due soonest' },
 ];
 
-type StatusFilter = Invoice['status'] | 'All';
-type SortOption = 'newest' | 'oldest' | 'highest' | 'due-soonest';
-
-const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
-
-const SORT_OPTIONS: { value: SortOption; label: string }[] = [
-  { value: 'newest', label: 'Newest first' },
-  { value: 'oldest', label: 'Oldest first' },
-  { value: 'highest', label: 'Highest amount' },
-  { value: 'due-soonest', label: 'Due soonest' },
-];
+/** Number of invoices to load per page */
+const PAGE_SIZE = 20;
 
 export default function DashboardPage() {
   const { wallet } = useStore();
   const [invoices, setInvoices] = useState<DashboardRow[]>([]);
   const [committedMap, setCommittedMap] = useState<Record<number, bigint>>({});
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
   const [sort, setSort] = useState<SortOption>('newest');
+
+  /** Total number of on-chain invoices (not just the user's) */
+  const [totalOnChainCount, setTotalOnChainCount] = useState(0);
+  /** How many on-chain invoices we have already scanned */
+  const [scannedCount, setScannedCount] = useState(0);
+  /** Whether all on-chain invoices have been scanned */
+  const hasMore = scannedCount < totalOnChainCount;
+
+  /** Ref used to preserve scroll position when loading more */
+  const listRef = useRef<HTMLDivElement>(null);
 
   // Check if user is first-time visitor
   useEffect(() => {
@@ -55,48 +57,104 @@ export default function DashboardPage() {
     }
   }, []);
 
-  const loadInvoices = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const count = await getInvoiceCount();
+  /**
+   * Fetch a batch of invoices starting from `startId` down to 1 (newest first).
+   * Returns the user's invoices found in this batch and the co-funding map entries.
+   */
+  const fetchBatch = useCallback(
+    async (startId: number, batchSize: number) => {
+      const endId = Math.max(1, startId - batchSize + 1);
+      const ids = Array.from({ length: startId - endId + 1 }, (_, i) => startId - i);
+
       const fetched = await Promise.all(
-        Array.from({ length: count }, (_, j) => j + 1).map(async (i) => {
-          const invoice = await getInvoice(i);
-          return { id: i, invoice };
+        ids.map(async (id) => {
+          const invoice = await getInvoice(id);
+          return { id, invoice };
         }),
       );
+
       const mine = fetched.filter((row) => row.invoice.owner === wallet.address);
-      const all: DashboardRow[] = await Promise.all(
+      const rows: DashboardRow[] = await Promise.all(
         mine.map(async ({ id, invoice }) => ({
           invoice,
           metadata: await getInvoiceMetadata(id),
         })),
       );
-      setInvoices(all);
 
-      // Fetch co-funding progress for pending invoices
+      // Fetch co-funding progress for pending invoices in this batch
       const committed: Record<number, bigint> = {};
       await Promise.all(
-        all
+        rows
           .filter((row) => row.invoice.status === 'Pending')
           .map(async (row) => {
             try {
               const record = await getFundedInvoice(row.invoice.id);
               if (record) committed[row.invoice.id] = record.committed;
             } catch {
-              // Not registered for co-funding yet — leave uncommitted
+              // Not registered for co-funding yet
             }
           }),
       );
+
+      return { rows, committed, scannedUpTo: endId - 1 };
+    },
+    [wallet.address],
+  );
+
+  /** Initial load — fetches the first PAGE_SIZE invoices (from newest) */
+  const loadInvoices = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const count = await getInvoiceCount();
+      setTotalOnChainCount(count);
+
+      if (count === 0) {
+        setInvoices([]);
+        setCommittedMap({});
+        setScannedCount(0);
+        return;
+      }
+
+      const { rows, committed, scannedUpTo } = await fetchBatch(count, PAGE_SIZE);
+      setInvoices(rows);
       setCommittedMap(committed);
+      setScannedCount(count - Math.max(scannedUpTo, 0));
     } catch (e) {
       setError('Failed to load invoices. Make sure contracts are deployed.');
       console.error(e);
     } finally {
       setLoading(false);
     }
-  }, [wallet.address]);
+  }, [fetchBatch]);
+
+  /** Load the next page of invoices */
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+
+    // Save scroll position
+    const scrollY = window.scrollY;
+
+    setLoadingMore(true);
+    try {
+      const nextStartId = totalOnChainCount - scannedCount;
+      if (nextStartId < 1) return;
+
+      const { rows, committed } = await fetchBatch(nextStartId, PAGE_SIZE);
+      setInvoices((prev) => [...prev, ...rows]);
+      setCommittedMap((prev) => ({ ...prev, ...committed }));
+      setScannedCount((prev) => Math.min(prev + PAGE_SIZE, totalOnChainCount));
+
+      // Restore scroll position after DOM update
+      requestAnimationFrame(() => {
+        window.scrollTo(0, scrollY);
+      });
+    } catch (e) {
+      console.error('Failed to load more invoices:', e);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, hasMore, totalOnChainCount, scannedCount, fetchBatch]);
 
   useEffect(() => {
     if (!wallet.connected) {
@@ -216,7 +274,7 @@ export default function DashboardPage() {
               </div>
 
               {/* Invoices */}
-              <div>
+              <div ref={listRef}>
                 <h2 className="text-lg font-semibold mb-4">Your Invoices</h2>
 
                 {/* Search */}
@@ -321,11 +379,48 @@ export default function DashboardPage() {
                     )}
                   </div>
                 ) : (
-                  <div className="space-y-4">
-                    {filtered.map((inv) => (
-                      <InvoiceCard key={inv.id} invoice={inv} fundedAmount={committedMap[inv.id]} />
-                    ))}
-                  </div>
+                  <>
+                    <div className="space-y-4">
+                      {filtered.map((inv) => (
+                        <InvoiceCard
+                          key={inv.invoice.id}
+                          id={inv.invoice.id}
+                          metadata={inv.metadata}
+                          fundedAmount={committedMap[inv.invoice.id]}
+                        />
+                      ))}
+                    </div>
+
+                    {/* Load More / Pagination Controls */}
+                    {hasMore && (
+                      <div className="mt-6 text-center">
+                        <button
+                          onClick={loadMore}
+                          disabled={loadingMore}
+                          className="px-6 py-2.5 bg-brand-card border border-brand-border rounded-xl text-sm font-medium text-white hover:border-brand-gold/50 transition-colors disabled:opacity-50"
+                        >
+                          {loadingMore ? (
+                            <span className="flex items-center justify-center gap-2">
+                              <span className="w-4 h-4 border-2 border-brand-gold border-t-transparent rounded-full animate-spin" />
+                              Loading more...
+                            </span>
+                          ) : (
+                            `Load more invoices`
+                          )}
+                        </button>
+                        <p className="text-xs text-brand-muted mt-2">
+                          Showing {invoices.length} invoice{invoices.length !== 1 ? 's' : ''}
+                          {totalOnChainCount > 0 && ` · Scanned ${scannedCount} of ${totalOnChainCount} on-chain`}
+                        </p>
+                      </div>
+                    )}
+
+                    {!hasMore && invoices.length > 0 && (
+                      <p className="text-xs text-brand-muted text-center mt-4">
+                        All invoices loaded · {invoices.length} total
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -348,17 +443,3 @@ export default function DashboardPage() {
     </div>
   );
 }
-
-// Type definitions
-type StatusFilter = 'All' | 'Pending' | 'Funded' | 'Paid' | 'Defaulted';
-type SortOption = 'newest' | 'oldest' | 'highest' | 'due-soonest';
-
-// Constants
-const STATUS_TABS: StatusFilter[] = ['All', 'Pending', 'Funded', 'Paid', 'Defaulted'];
-
-const SORT_OPTIONS = [
-  { value: 'newest', label: 'Newest First' },
-  { value: 'oldest', label: 'Oldest First' },
-  { value: 'highest', label: 'Highest Amount' },
-  { value: 'due-soonest', label: 'Due Soonest' },
-];
