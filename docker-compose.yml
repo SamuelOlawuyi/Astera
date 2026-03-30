@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  stellar:
+    image: stellar/quickstart:testing
+    command: --local
+    ports:
+      - "8000:8000"
+      - "11626:11626"
+    volumes:
+      - stellar-data:/opt/stellar
+
+  contracts:
+    build:
+      context: ./contracts
+      dockerfile: Dockerfile
+    volumes:
+      - ./contracts:/app
+    depends_on:
+      - stellar
+    command: tail -f /dev/null
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - stellar
+      - contracts
+
+  mock-service:
+    image: node:20-alpine
+    working_dir: /mock-service
+    volumes:
+      - ./mock-service:/mock-service
+    command: npx -y json-server@0.17.4 --watch db.json --port 4000 --host 0.0.0.0
+    ports:
+      - "4000:4000"
+
+volumes:
+  stellar-data:

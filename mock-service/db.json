@@ -1,0 +1,9 @@
+{
+  "invoices": [
+    { "id": 1, "amount": 1000, "status": "funded" },
+    { "id": 2, "amount": 5000, "status": "open" }
+  ],
+  "users": [
+    { "id": 1, "name": "Local Dev SME" }
+  ]
+}
