@@ -14,6 +14,7 @@ const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
 const MAX_INVOICES_PER_DAY: u32 = 10;
 const SECS_PER_DAY: u64 = 86400;
 const DEFAULT_GRACE_PERIOD_DAYS: u32 = 7; // 7 days default grace period
+const DEFAULT_EXPIRATION_DURATION_SECS: u64 = SECS_PER_DAY * 30; // 30 days
 
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -26,6 +27,7 @@ pub enum InvoiceStatus {
     Paid,
     Defaulted,
     Cancelled,
+    Expired,
 }
 
 #[contracttype]
@@ -91,9 +93,47 @@ pub enum DataKey {
     UpgradeScheduledAt,
     GracePeriodDays,
     MaxInvoiceAmount,
+    ExpirationDurationSecs,
 }
 
 const EVT: Symbol = symbol_short!("INVOICE");
+
+fn maybe_expire_pending_invoice(env: &Env, mut invoice: Invoice) -> Invoice {
+    if invoice.status != InvoiceStatus::Pending {
+        return invoice;
+    }
+
+    let expiration_duration_secs: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ExpirationDurationSecs)
+        .unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS);
+
+    let now = env.ledger().timestamp();
+    if now <= invoice.created_at.saturating_add(expiration_duration_secs) {
+        return invoice;
+    }
+
+    invoice.status = InvoiceStatus::Expired;
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::Invoice(invoice.id), &invoice);
+    set_invoice_ttl(env, invoice.id, true);
+
+    let mut stats: StorageStats = env
+        .storage()
+        .instance()
+        .get(&DataKey::StorageStats)
+        .unwrap_or_default();
+    stats.active_invoices = stats.active_invoices.saturating_sub(1);
+    env.storage().instance().set(&DataKey::StorageStats, &stats);
+
+    env.events()
+        .publish((EVT, symbol_short!("expired")), invoice.id);
+
+    invoice
+}
 
 fn bump_instance(env: &Env) {
     env.storage()
@@ -171,12 +211,21 @@ pub struct InvoiceContract;
 
 #[contractimpl]
 impl InvoiceContract {
-    pub fn initialize(env: Env, admin: Address, pool: Address, max_invoice_amount: i128) {
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        pool: Address,
+        max_invoice_amount: i128,
+        expiration_duration_secs: u64,
+    ) {
         if env.storage().instance().has(&DataKey::Initialized) {
             panic!("already initialized");
         }
         if max_invoice_amount <= 0 {
             panic!("max invoice amount must be positive");
+        }
+        if expiration_duration_secs == 0 {
+            panic!("expiration duration must be non-zero");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Pool, &pool);
@@ -192,6 +241,10 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::MaxInvoiceAmount, &max_invoice_amount);
+        env.storage().instance().set(
+            &DataKey::ExpirationDurationSecs,
+            &expiration_duration_secs,
+        );
         bump_instance(&env);
     }
 
@@ -470,6 +523,11 @@ impl InvoiceContract {
             .get(&DataKey::Invoice(id))
             .expect("invoice not found");
 
+        invoice = maybe_expire_pending_invoice(&env, invoice);
+        if invoice.status == InvoiceStatus::Expired {
+            panic!("invoice is expired");
+        }
+
         let is_fundable =
             invoice.status == InvoiceStatus::Pending || invoice.status == InvoiceStatus::Verified;
         if !is_fundable {
@@ -600,6 +658,8 @@ impl InvoiceContract {
             .get(&DataKey::Invoice(id))
             .expect("invoice not found");
 
+        invoice = maybe_expire_pending_invoice(&env, invoice);
+
         if owner != invoice.owner {
             panic!("unauthorized");
         }
@@ -648,7 +708,8 @@ impl InvoiceContract {
 
         let is_completed = invoice.status == InvoiceStatus::Paid
             || invoice.status == InvoiceStatus::Defaulted
-            || invoice.status == InvoiceStatus::Cancelled;
+            || invoice.status == InvoiceStatus::Cancelled
+            || invoice.status == InvoiceStatus::Expired;
         if !is_completed {
             panic!("can only cleanup completed invoices");
         }
@@ -766,6 +827,39 @@ impl InvoiceContract {
             .expect("max invoice amount not set")
     }
 
+    pub fn set_expiration_duration(env: Env, admin: Address, expiration_duration_secs: u64) {
+        admin.require_auth();
+        require_not_paused(&env);
+        bump_instance(&env);
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            panic!("unauthorized");
+        }
+        if expiration_duration_secs == 0 {
+            panic!("expiration duration must be non-zero");
+        }
+        env.storage().instance().set(
+            &DataKey::ExpirationDurationSecs,
+            &expiration_duration_secs,
+        );
+        env.events().publish(
+            (EVT, symbol_short!("set_exp")),
+            (admin, expiration_duration_secs),
+        );
+    }
+
+    pub fn get_expiration_duration(env: Env) -> u64 {
+        bump_instance(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::ExpirationDurationSecs)
+            .unwrap_or(DEFAULT_EXPIRATION_DURATION_SECS)
+    }
+
     pub fn get_grace_period(env: Env) -> u32 {
         bump_instance(&env);
         env.storage()
@@ -859,7 +953,7 @@ mod test {
         let admin = Address::generate(env);
         let pool = Address::generate(env);
         let sme = Address::generate(env);
-        client.initialize(&admin, &pool, &i128::MAX);
+        client.initialize(&admin, &pool, &i128::MAX, &DEFAULT_EXPIRATION_DURATION_SECS);
         (client, admin, pool, sme)
     }
 
@@ -1718,7 +1812,7 @@ mod test {
         let pool = Address::generate(&env);
         let sme = Address::generate(&env);
 
-        client.initialize(&admin, &pool, &1_000i128);
+        client.initialize(&admin, &pool, &1_000i128, &DEFAULT_EXPIRATION_DURATION_SECS);
 
         client.create_invoice(
             &sme,
@@ -1750,5 +1844,65 @@ mod test {
 
         let intruder = Address::generate(&env);
         client.set_max_invoice_amount(&intruder, &100i128);
+    }
+
+    // ---- Expiration Tests ----
+
+    #[test]
+    fn test_pending_invoice_expires_after_duration_on_read() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pool = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        client.initialize(&admin, &pool, &i128::MAX, &10u64);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 11);
+
+        let inv = client.get_invoice(&id);
+        assert_eq!(inv.status, InvoiceStatus::Expired);
+    }
+
+    #[test]
+    #[should_panic(expected = "invoice is expired")]
+    fn test_expired_invoice_cannot_be_funded() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|l| l.timestamp = 100_000);
+
+        let contract_id = env.register(InvoiceContract, ());
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pool = Address::generate(&env);
+        let sme = Address::generate(&env);
+
+        client.initialize(&admin, &pool, &i128::MAX, &1u64);
+
+        let id = client.create_invoice(
+            &sme,
+            &String::from_str(&env, "D"),
+            &1_000i128,
+            &(env.ledger().timestamp() + 10_000),
+            &String::from_str(&env, "x"),
+            &String::from_str(&env, "h"),
+        );
+
+        env.ledger().with_mut(|l| l.timestamp += 2);
+
+        client.mark_funded(&id, &pool);
     }
 }
