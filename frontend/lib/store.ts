@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import type { WalletState, PoolConfig, InvestorPosition } from './types';
 
+// NOTE: Contract-derived objects (PoolConfig, InvestorPosition, etc.) are
+// stored as-is in memory — including any `bigint` values needed for math.
+// Do NOT `JSON.stringify` these objects directly. Use `safeStringify` from
+// `lib/stellar.ts` for any logging, network or persistence serialization.
+// See `safeSerialize` doc block in `lib/stellar.ts` for details.
+
 const WALLET_KEY = 'astera_wallet_address';
 
 export function getStoredWalletAddress(): string | null {

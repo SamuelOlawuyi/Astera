@@ -1,4 +1,5 @@
 import { AlertPriority, AlertType } from './alert-rules';
+import { safeStringify } from './stellar';
 
 /** Notification Record Interface */
 export interface NotificationAlert {
@@ -55,7 +56,7 @@ class NotificationService {
     const icon = alert.priority === 'CRITICAL' ? '🔥' : alert.priority === 'HIGH' ? '🚨' : '⚠️';
     console.log(`[Astera Alert ${icon}] [${alert.priority}] ${alert.type}: ${alert.message}`);
     if (alert.data) {
-      console.log('Context Data:', JSON.stringify(alert.data, null, 2));
+      console.log('Context Data:', safeStringify(alert.data, 2));
     }
   }
 
@@ -78,7 +79,7 @@ class NotificationService {
             fields: [
               { title: 'Message', value: alert.message, short: false },
               { title: 'Time', value: new Date(alert.timestamp).toISOString(), short: true },
-              { title: 'Context', value: JSON.stringify(alert.data || {}), short: false },
+              { title: 'Context', value: safeStringify(alert.data || {}), short: false },
             ],
           },
         ],
@@ -87,7 +88,7 @@ class NotificationService {
       await fetch(webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: safeStringify(payload),
       });
 
       console.log(`[Astera] Successfully dispatched ${alert.priority} alert to external webhook.`);

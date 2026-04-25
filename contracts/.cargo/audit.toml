@@ -4,4 +4,6 @@
 ignore = []
 
 [output]
-deny = ["unmaintained", "unsound", "vulnerability"]
+# Valid deny values: "warnings", "unmaintained", "unsound", "yanked"
+# ("vulnerability" was removed in cargo-audit 0.18 — vulnerabilities always fail.)
+deny = ["unmaintained", "unsound"]

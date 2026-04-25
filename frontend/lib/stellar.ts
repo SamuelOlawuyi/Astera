@@ -238,6 +238,61 @@ export function truncateAddress(addr: string): string {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
+// ---- BigInt handling ----
+//
+// Contract responses decoded via `scValToNative` may include `bigint` values
+// for Soroban numeric types such as `i128` and `u64`. `JSON.stringify` cannot
+// serialize `bigint` and throws `TypeError: Do not know how to serialize a
+// BigInt` when encountered (e.g. when logging, persisting, or sending to an
+// API). Any object that may contain contract-derived numbers MUST be passed
+// through `safeSerialize` / `safeStringify` before being stored in Zustand,
+// written to `localStorage`, sent via `fetch`, or handed to a JSON logger.
+//
+// Consumer code that needs the numeric value should continue to work with
+// `bigint` directly (for math) and only serialize at the system boundary.
+
+/**
+ * Deeply convert any `bigint` values in a value to strings so it can be
+ * safely passed to `JSON.stringify`. Arrays and plain objects are recursed
+ * into; other values are returned unchanged.
+ *
+ * The return type is intentionally `unknown` — callers should narrow to the
+ * JSON-serializable shape they expect.
+ */
+export function safeSerialize<T>(value: T): unknown {
+  if (typeof value === 'bigint') {
+    return value.toString();
+  }
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => safeSerialize(item));
+  }
+  if (typeof value === 'object') {
+    // Only recurse into plain objects. Leave class instances (Date, Map, etc.)
+    // untouched so JSON.stringify can apply its normal semantics.
+    const proto = Object.getPrototypeOf(value);
+    if (proto === Object.prototype || proto === null) {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        out[k] = safeSerialize(v);
+      }
+      return out;
+    }
+  }
+  return value;
+}
+
+/**
+ * Convenience wrapper: `JSON.stringify` with BigInt support.
+ * Use whenever an object that may contain contract-derived numbers is about
+ * to be serialized (logs, fetch bodies, `localStorage`, etc.).
+ */
+export function safeStringify(value: unknown, space?: number): string {
+  return JSON.stringify(safeSerialize(value), null, space);
+}
+
 /** Human label for a pool stablecoin (matches env-known tokens). */
 export function stablecoinLabel(tokenId: string): string {
   if (tokenId === USDC_TOKEN_ID) return 'USDC';
@@ -287,7 +342,7 @@ export async function submitTx(
     const response = await server.sendTransaction(tx);
 
     if (response.status === 'ERROR') {
-      const error = `Transaction failed: ${JSON.stringify(response)}`;
+      const error = `Transaction failed: ${safeStringify(response)}`;
       onProgress?.({ status: 'failed', hash: response.hash, error });
       throw new Error(error);
     }

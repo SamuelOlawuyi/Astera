@@ -1,5 +1,7 @@
 # Astera
 
+[![Soroban Contracts CI](https://github.com/Jayy4rl/Astera/actions/workflows/contracts.yml/badge.svg?branch=main)](https://github.com/Jayy4rl/Astera/actions/workflows/contracts.yml)
+
 **Real World Assets on Stellar. Invoice financing for emerging markets.**
 
 Astera lets SMEs tokenize unpaid invoices as Soroban-based RWA tokens. Community investors
@@ -196,3 +198,26 @@ For production deployment, see the comprehensive [Mainnet Deployment Guide](docs
 - **RPC:** https://soroban-mainnet.stellar.org
 - **Horizon:** https://horizon.stellar.org
 - **Explorer:** https://stellar.expert/explorer/public
+
+---
+
+## Continuous Integration
+
+The [`contracts.yml`](.github/workflows/contracts.yml) workflow runs on every push
+to `main` and on every pull request targeting `main`. It:
+
+- Installs Rust stable with the `wasm32-unknown-unknown` target
+- Caches `~/.cargo/registry` and `target/` via `Swatinem/rust-cache`
+- Builds the workspace with `cargo build --target wasm32-unknown-unknown --release`
+- Runs `cargo test` for each contract (`invoice`, `pool`, `credit_score`)
+
+### Branch protection
+
+Branch protection for `main` should be configured so that:
+
+- Pull requests cannot be merged unless the **`Build & test Soroban contracts`** check passes.
+- Direct pushes to `main` are disabled (PRs only).
+
+To apply, in GitHub: **Settings → Branches → Branch protection rules → Add rule** for
+`main`, enable **Require status checks to pass before merging**, and select
+`Build & test Soroban contracts` from the list of checks.
