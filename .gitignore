@@ -32,6 +32,3 @@ target/
 
 # Contract test snapshots (generated)
 contracts/**/test_snapshots/
-
-# proptest regression artifacts (generated)
-**/*.proptest-regressions
