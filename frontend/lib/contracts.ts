@@ -328,7 +328,11 @@ export async function buildCommitToInvoiceTx(params: {
   return prepared.toXDR();
 }
 
-export async function buildRepayTx(params: { payer: string; invoiceId: number; amount: bigint }): Promise<string> {
+export async function buildRepayTx(params: {
+  payer: string;
+  invoiceId: number;
+  amount: bigint;
+}): Promise<string> {
   const account = await rpc.getAccount(params.payer);
   const contract = new Contract(POOL_CONTRACT_ID);
 
@@ -597,6 +601,38 @@ export async function buildSetExchangeRateTx(
     throw new Error(`Simulation failed: ${sim.error}`);
   }
   return StellarRpc.assembleTransaction(tx, sim).build().toXDR();
+}
+
+// ---- #157: SSE Events convenience wrapper ----
+
+/**
+ * Fetch the current investor position for a given wallet address.
+ * Used by the SSE polling service to refresh portfolio data automatically.
+ */
+export async function fetchInvestorPosition(investor: string): Promise<InvestorPosition | null> {
+  // Try USDC first (most common), fall back to EURC
+  const USDC_TOKEN_ID = process.env.NEXT_PUBLIC_USDC_TOKEN_ID ?? '';
+  const EURC_TOKEN_ID = process.env.NEXT_PUBLIC_EURC_TOKEN_ID ?? '';
+
+  try {
+    if (USDC_TOKEN_ID) {
+      const pos = await getInvestorPosition(investor, USDC_TOKEN_ID);
+      if (pos) return pos;
+    }
+  } catch {
+    // Fall through to EURC
+  }
+
+  try {
+    if (EURC_TOKEN_ID) {
+      const pos = await getInvestorPosition(investor, EURC_TOKEN_ID);
+      if (pos) return pos;
+    }
+  } catch {
+    // No position found
+  }
+
+  return null;
 }
 
 export { submitTx };

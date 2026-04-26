@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { WalletState, PoolConfig, InvestorPosition } from './types';
+import type { StoreEvent } from './sse-events';
 
 // NOTE: Contract-derived objects (PoolConfig, InvestorPosition, etc.) are
 // stored as-is in memory — including any `bigint` values needed for math.
@@ -19,16 +20,30 @@ interface AsteraStore {
   poolConfig: PoolConfig | null;
   position: InvestorPosition | null;
 
+  // SSE Events state
+  recentEvents: StoreEvent[];
+  lastPollTime: number | null;
+  pollingInterval: number;
+
   setWallet: (wallet: WalletState) => void;
   setPoolConfig: (config: PoolConfig) => void;
   setPosition: (position: InvestorPosition | null) => void;
+  setRecentEvents: (events: StoreEvent[]) => void;
+  setLastPollTime: (time: number) => void;
+  setPollingInterval: (interval: number) => void;
   disconnect: () => void;
+  refreshPosition: () => void;
 }
 
-export const useStore = create<AsteraStore>((set) => ({
+export const useStore = create<AsteraStore>((set, get) => ({
   wallet: { address: null, connected: false, network: 'testnet' },
   poolConfig: null,
   position: null,
+
+  // SSE Events state
+  recentEvents: [],
+  lastPollTime: null,
+  pollingInterval: 15_000,
 
   setWallet: (wallet) => {
     if (typeof window !== 'undefined') {
@@ -42,10 +57,33 @@ export const useStore = create<AsteraStore>((set) => ({
   },
   setPoolConfig: (poolConfig) => set({ poolConfig }),
   setPosition: (position) => set({ position }),
+  setRecentEvents: (recentEvents) => set({ recentEvents }),
+  setLastPollTime: (lastPollTime) => set({ lastPollTime }),
+  setPollingInterval: (pollingInterval) => set({ pollingInterval }),
   disconnect: () => {
     if (typeof window !== 'undefined') {
       localStorage.removeItem(WALLET_KEY);
     }
-    set({ wallet: { address: null, connected: false, network: 'testnet' }, position: null });
+    set({
+      wallet: { address: null, connected: false, network: 'testnet' },
+      position: null,
+      poolConfig: null,
+      recentEvents: [],
+    });
+  },
+  refreshPosition: async () => {
+    // Placeholder for actual on-chain position refresh
+    // In production, this would call the pool contract's get_position method
+    const { wallet } = get();
+    if (!wallet.address) return;
+
+    try {
+      // Dynamic import to avoid circular deps
+      const { fetchInvestorPosition } = await import('./contracts');
+      const position = await fetchInvestorPosition(wallet.address);
+      set({ position });
+    } catch (error) {
+      console.error('[Store] Failed to refresh position:', error);
+    }
   },
 }));

@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { TableRowSkeleton } from '@/components/Skeleton';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
 import {
   getMultipleInvoices,
   getInvoiceCount,
@@ -16,6 +17,14 @@ import type { Invoice } from '@/lib/types';
 /** Number of invoices to scan per batch */
 const PAGE_SIZE = 20;
 
+type ModalAction = 'approve' | 'dispute' | 'verify' | null;
+
+interface ModalState {
+  isOpen: boolean;
+  invoice: Invoice | null;
+  action: ModalAction;
+}
+
 export default function AdminInvoicesPage() {
   const { wallet } = useStore();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -24,6 +33,11 @@ export default function AdminInvoicesPage() {
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [totalCount, setTotalCount] = useState(0);
   const [scannedCount, setScannedCount] = useState(0);
+  const [modalState, setModalState] = useState<ModalState>({
+    isOpen: false,
+    invoice: null,
+    action: null,
+  });
 
   const hasMore = scannedCount < totalCount;
 
@@ -80,18 +94,15 @@ export default function AdminInvoicesPage() {
     loadInvoices();
   }, [loadInvoices]);
 
-  async function handleApprove(invoice: Invoice) {
-    if (!wallet.address) return;
+  function openApproveModal(invoice: Invoice) {
+    setModalState({ isOpen: true, invoice, action: 'approve' });
+  }
 
-    // Simple confirmation
-    if (
-      !confirm(
-        `Are you sure you want to approve and fund Invoice #${invoice.id} for ${formatUSDC(invoice.amount)}?`,
-      )
-    ) {
-      return;
-    }
+  async function handleApprove() {
+    const invoice = modalState.invoice;
+    if (!invoice || !wallet.address) return;
 
+    setModalState({ isOpen: false, invoice: null, action: null });
     setActionLoading(invoice.id);
 
     try {
@@ -123,6 +134,33 @@ export default function AdminInvoicesPage() {
       setActionLoading(null);
     }
   }
+
+  const modalConfig: Record<NonNullable<ModalAction>, { title: string; description: string; confirmPhrase?: string; variant: 'default' | 'destructive'; confirmLabel: string }> = {
+    approve: {
+      title: (id: number) => `Approve Invoice #${id}`,
+      description: (inv: Invoice) =>
+        `Approve and fund Invoice #${inv.id} for ${formatUSDC(inv.amount)}. This will initiate co-funding from the liquidity pool.`,
+      variant: 'default',
+      confirmLabel: 'Approve & Fund',
+    },
+    dispute: {
+      title: (id: number) => `Mark Invoice #${id} as Disputed`,
+      description: (inv: Invoice) =>
+        `Mark Invoice #${inv.id} as disputed. This will pause all funding activities and flag the invoice for manual review.`,
+      variant: 'destructive',
+      confirmPhrase: 'DISPUTE',
+      confirmLabel: 'Mark as Disputed',
+    },
+    verify: {
+      title: (id: number) => `Verify Invoice #${id}`,
+      description: (inv: Invoice) =>
+        `Verify Invoice #${inv.id} as authentic. This confirms the invoice details and enables funding.`,
+      variant: 'default',
+      confirmLabel: 'Verify Invoice',
+    },
+  };
+
+  const currentConfig = modalState.action ? modalConfig[modalState.action] : null;
 
   return (
     <div className="space-y-8">
@@ -189,7 +227,7 @@ export default function AdminInvoicesPage() {
                     </td>
                     <td className="px-6 py-4">
                       <button
-                        onClick={() => handleApprove(inv)}
+                        onClick={() => openApproveModal(inv)}
                         disabled={actionLoading !== null}
                         className="px-4 py-2 bg-brand-gold text-brand-dark text-xs font-bold rounded-lg hover:bg-brand-amber transition-colors disabled:opacity-50 whitespace-nowrap"
                       >
@@ -225,6 +263,20 @@ export default function AdminInvoicesPage() {
             Scanned {scannedCount} of {totalCount} on-chain invoices
           </p>
         </div>
+      )}
+
+      {/* Confirmation Modal */}
+      {modalState.isOpen && modalState.invoice && currentConfig && (
+        <ConfirmActionModal
+          title={currentConfig.title(modalState.invoice.id)}
+          description={currentConfig.description(modalState.invoice)}
+          confirmPhrase={currentConfig.confirmPhrase}
+          onConfirm={handleApprove}
+          onCancel={() => setModalState({ isOpen: false, invoice: null, action: null })}
+          variant={currentConfig.variant}
+          isOpen={modalState.isOpen}
+          confirmLabel={currentConfig.confirmLabel}
+        />
       )}
     </div>
   );

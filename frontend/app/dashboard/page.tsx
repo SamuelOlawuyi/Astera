@@ -18,12 +18,19 @@ import {
 } from '@/lib/contracts';
 import { formatUSDC } from '@/lib/stellar';
 import type { Invoice, InvoiceMetadata } from '@/lib/types';
+import { filterInvoicesByStatuses } from '@/lib/dashboardFilters';
 import { useTranslations } from 'next-intl';
 
 type DashboardRow = { invoice: Invoice; metadata: InvoiceMetadata };
 
-type StatusFilter = Invoice['status'] | 'All';
-type SortOption = 'created-desc' | 'created-asc' | 'amount-desc' | 'due-asc';
+type StatusFilter = Invoice['status'];
+type SortOption =
+  | 'created-desc'
+  | 'created-asc'
+  | 'amount-desc'
+  | 'amount-asc'
+  | 'due-asc'
+  | 'due-desc';
 
 /** Number of invoices to load per page */
 const PAGE_SIZE = 20;
@@ -40,7 +47,8 @@ export default function DashboardPage() {
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [statusFilters, setStatusFilters] = useState<StatusFilter[]>([]);
   const [sort, setSort] = useState<SortOption>('created-desc');
   const [hydrated, setHydrated] = useState(false);
 
@@ -53,7 +61,9 @@ export default function DashboardPage() {
     { value: 'created-desc', label: t('sort.createdDesc') },
     { value: 'created-asc', label: t('sort.createdAsc') },
     { value: 'amount-desc', label: t('sort.amountDesc') },
+    { value: 'amount-asc', label: t('sort.amountAsc') },
     { value: 'due-asc', label: t('sort.dueAsc') },
+    { value: 'due-desc', label: t('sort.dueDesc') },
   ];
 
   /** Total number of on-chain invoices (not just the user's) */
@@ -76,18 +86,28 @@ export default function DashboardPage() {
     const params = new URLSearchParams(window.location.search);
     const q = params.get('q') ?? '';
     const status = params.get('status');
-    const initialStatus = STATUS_TABS.includes(status as StatusFilter)
-      ? (status as StatusFilter)
-      : 'All';
+    const initialStatuses = status
+      ? status
+          .split(',')
+          .filter((value): value is StatusFilter => STATUS_TABS.includes(value as StatusFilter))
+      : [];
     const initialSort = params.get('sort');
     const initialSortValue = SORT_OPTIONS.some((opt) => opt.value === initialSort)
       ? (initialSort as SortOption)
       : 'created-desc';
 
     setSearch(q);
-    setStatusFilter(initialStatus);
+    setDebouncedSearch(q);
+    setStatusFilters(initialStatuses);
     setSort(initialSortValue);
   }, [hydrated]);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [search]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -233,9 +253,7 @@ export default function DashboardPage() {
       );
     }
 
-    if (statusFilter !== 'All') {
-      result = result.filter((row) => row.invoice.status === statusFilter);
-    }
+    result = filterInvoicesByStatuses(result, statusFilters);
 
     switch (sort) {
       case 'created-desc':
@@ -253,15 +271,27 @@ export default function DashboardPage() {
               : 0,
         );
         break;
+      case 'amount-asc':
+        result.sort((a, b) =>
+          a.metadata.amount > b.metadata.amount
+            ? 1
+            : a.metadata.amount < b.metadata.amount
+              ? -1
+              : 0,
+        );
+        break;
       case 'due-asc':
         result.sort((a, b) => a.metadata.dueDate - b.metadata.dueDate);
+        break;
+      case 'due-desc':
+        result.sort((a, b) => b.metadata.dueDate - a.metadata.dueDate);
         break;
     }
 
     return result;
   }, [invoices, debouncedSearch, statusFilter, sort]);
 
-  const isFiltered = search.trim() !== '' || statusFilter !== 'All';
+  const isFiltered = debouncedSearch.trim() !== '' || statusFilters.length > 0;
 
   return (
     <div className="min-h-screen pt-24 pb-16 px-6">
@@ -359,12 +389,26 @@ export default function DashboardPage() {
                 {/* Status tabs + Sort */}
                 <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
                   <div className="flex gap-1 flex-wrap">
+                    <button
+                      onClick={() => setStatusFilters([])}
+                      className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                        statusFilters.length === 0
+                          ? 'bg-brand-gold text-brand-dark'
+                          : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
+                      }`}
+                    >
+                      {t('status.all')}
+                    </button>
                     {STATUS_TABS.map((tab) => (
                       <button
                         key={tab}
-                        onClick={() => setStatusFilter(tab)}
+                        onClick={() =>
+                          setStatusFilters((prev) =>
+                            prev.includes(tab) ? prev.filter((item) => item !== tab) : [...prev, tab],
+                          )
+                        }
                         className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                          statusFilter === tab
+                          statusFilters.includes(tab)
                             ? 'bg-brand-gold text-brand-dark'
                             : 'text-brand-muted hover:text-white bg-brand-card border border-brand-border'
                         }`}
@@ -386,6 +430,21 @@ export default function DashboardPage() {
                     ))}
                   </select>
                 </div>
+                {statusFilters.length > 0 && (
+                  <div className="flex items-center gap-2 flex-wrap mb-4">
+                    {statusFilters.map((status) => (
+                      <button
+                        key={status}
+                        onClick={() =>
+                          setStatusFilters((prev) => prev.filter((item) => item !== status))
+                        }
+                        className="px-2.5 py-1 rounded-full text-xs bg-brand-card border border-brand-border text-white hover:border-brand-gold/60"
+                      >
+                        {t(`status.${status.toLowerCase()}`)} ✕
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 {loading ? (
                   <div className="space-y-4">
@@ -410,7 +469,8 @@ export default function DashboardPage() {
                       <button
                         onClick={() => {
                           setSearch('');
-                          setStatusFilter('All');
+                          setDebouncedSearch('');
+                          setStatusFilters([]);
                         }}
                         className="text-brand-gold hover:underline text-sm font-medium"
                       >

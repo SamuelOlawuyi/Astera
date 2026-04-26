@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { TableRowSkeleton } from '@/components/Skeleton';
+import ConfirmActionModal from '@/components/ConfirmActionModal';
 import { getInvoice, getInvoiceCount, buildMarkDefaultedTx, submitTx } from '@/lib/contracts';
 import { formatUSDC, truncateAddress, formatDate } from '@/lib/stellar';
 import type { Invoice } from '@/lib/types';
@@ -13,6 +14,10 @@ export default function AdminDefaultsPage() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
+  const [modalState, setModalState] = useState<{
+    isOpen: boolean;
+    invoice: Invoice | null;
+  }>({ isOpen: false, invoice: null });
 
   const loadOverdueInvoices = useCallback(async () => {
     setLoading(true);
@@ -41,17 +46,15 @@ export default function AdminDefaultsPage() {
     loadOverdueInvoices();
   }, [loadOverdueInvoices]);
 
-  async function handleMarkDefault(invoice: Invoice) {
-    if (!wallet.address) return;
+  function openMarkDefaultModal(invoice: Invoice) {
+    setModalState({ isOpen: true, invoice });
+  }
 
-    if (
-      !confirm(
-        `Are you sure you want to mark Invoice #${invoice.id} as DEFAULTED? This is an irreversible action and will freeze the SME's credit.`,
-      )
-    ) {
-      return;
-    }
+  async function handleMarkDefault() {
+    const invoice = modalState.invoice;
+    if (!invoice || !wallet.address) return;
 
+    setModalState({ isOpen: false, invoice: null });
     setActionLoading(invoice.id);
 
     try {
@@ -155,7 +158,7 @@ export default function AdminDefaultsPage() {
                       </td>
                       <td className="px-6 py-4 text-right">
                         <button
-                          onClick={() => handleMarkDefault(inv)}
+                          onClick={() => openMarkDefaultModal(inv)}
                           disabled={actionLoading !== null}
                           className="px-4 py-2 bg-red-900/30 text-red-500 border border-red-800/30 text-xs font-bold rounded-lg hover:bg-red-900/50 transition-all active:scale-[0.98] disabled:opacity-50 whitespace-nowrap"
                         >
@@ -183,15 +186,15 @@ export default function AdminDefaultsPage() {
           Protocol Enforcement Policy
         </div>
         <p>
-          • Invoices are considered <strong>Overdue</strong> once the ledger timestamp exceeds the
+          Invoices are considered <strong>Overdue</strong> once the ledger timestamp exceeds the
           registered <code>due_date</code>.
         </p>
         <p>
-          • Marking an invoice as <strong>Defaulted</strong> is a protocol-level event that
+          Marking an invoice as <strong>Defaulted</strong> is a protocol-level event that
           permanent stamps the invoice state.
         </p>
         <p>
-          • Defaulted status negatively impacts the SME&apos;s platform credit score and prevents
+          Defaulted status negatively impacts the SME&apos;s platform credit score and prevents
           future invoice tokenization.
         </p>
         <p className="text-brand-muted italic mt-2">
@@ -199,6 +202,22 @@ export default function AdminDefaultsPage() {
           address.
         </p>
       </div>
+
+      {/* Confirmation Modal for Mark Default */}
+      <ConfirmActionModal
+        title={`Mark Invoice #${modalState.invoice?.id ?? ''} as Defaulted`}
+        description={
+          modalState.invoice
+            ? `This will permanently mark Invoice #${modalState.invoice.id} as defaulted, seize any collateral (${formatUSDC(modalState.invoice.amount)}), and reduce the SME&apos;s credit score by 50 points. This action cannot be undone.`
+            : ''
+        }
+        confirmPhrase="CONFIRM DEFAULT"
+        onConfirm={handleMarkDefault}
+        onCancel={() => setModalState({ isOpen: false, invoice: null })}
+        variant="destructive"
+        isOpen={modalState.isOpen}
+        confirmLabel="Mark as Defaulted"
+      />
     </div>
   );
 }
