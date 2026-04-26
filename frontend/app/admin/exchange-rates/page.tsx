@@ -171,3 +171,5 @@ export default function AdminExchangeRatesPage() {
     </div>
   );
 }
+  /* Bounty contribution */
+}
