@@ -516,6 +516,79 @@ export async function buildDisputeTx(params: {
 
 // ---- #109: KYC / investor whitelist ----
 
+export interface KycInvestor {
+  address: string;
+  totalDeposited: bigint;
+  firstSeenAt: number;
+  isApproved: boolean;
+}
+
+export async function fetchKycInvestors(): Promise<{ pending: KycInvestor[]; approved: KycInvestor[] }> {
+  try {
+    const latestLedger = await rpc.getLatestLedger();
+    // Look back ~30 days (17280 * 30 ledgers) or as far as the RPC allows to find depositors
+    const startLedger = Math.max(1, latestLedger.sequence - 17280 * 30);
+
+    const response = await rpc.getEvents({
+      startLedger,
+      filters: [{ contractIds: [POOL_CONTRACT_ID] }],
+    });
+
+    const depositors = new Map<string, { total: bigint; firstSeen: number }>();
+
+    for (const e of response.events) {
+      try {
+        const topic = e.topic.map((t: string) => scValToNative(t));
+        if (topic[1] === 'deposit') {
+          const val = scValToNative(e.value) as unknown[];
+          const investor = val[0] as string;
+          const amount = val[1] as bigint;
+          const timestamp = new Date(e.ledgerCloseAt).getTime();
+
+          const existing = depositors.get(investor);
+          if (existing) {
+            depositors.set(investor, {
+              total: existing.total + amount,
+              firstSeen: Math.min(existing.firstSeen, timestamp),
+            });
+          } else {
+            depositors.set(investor, { total: amount, firstSeen: timestamp });
+          }
+        }
+      } catch (err) {
+        // skip parse errors
+      }
+    }
+
+    const pending: KycInvestor[] = [];
+    const approved: KycInvestor[] = [];
+
+    // Map each unique depositor to their KYC status
+    for (const [address, data] of Array.from(depositors.entries())) {
+      const isApproved = await getInvestorKyc(address);
+      const investor: KycInvestor = {
+        address,
+        totalDeposited: data.total,
+        firstSeenAt: data.firstSeen,
+        isApproved,
+      };
+      if (isApproved) {
+        approved.push(investor);
+      } else {
+        pending.push(investor);
+      }
+    }
+
+    pending.sort((a, b) => b.firstSeenAt - a.firstSeenAt);
+    approved.sort((a, b) => b.firstSeenAt - a.firstSeenAt);
+
+    return { pending, approved };
+  } catch (error) {
+    console.error('Failed to fetch KYC investors:', error);
+    return { pending: [], approved: [] };
+  }
+}
+
 export async function getKycRequired(): Promise<boolean> {
   const sim = await simulateTx(
     POOL_CONTRACT_ID,
