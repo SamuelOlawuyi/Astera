@@ -19,9 +19,11 @@ function LanguageSelector() {
   };
 
   return (
-    <div className="flex items-center gap-1 bg-brand-card border border-brand-border rounded-lg p-1">
+    <div className="flex items-center gap-1 bg-brand-card border border-brand-border rounded-lg p-1" role="group" aria-label="Language selector">
       <button
         onClick={() => handleLanguageChange('en')}
+        aria-pressed={locale === 'en'}
+        aria-label="English"
         className={`px-2 py-1 text-[10px] font-bold rounded transition-colors ${
           locale === 'en' ? 'bg-brand-gold text-brand-dark' : 'text-brand-muted hover:text-white'
         }`}
@@ -30,6 +32,8 @@ function LanguageSelector() {
       </button>
       <button
         onClick={() => handleLanguageChange('fr')}
+        aria-pressed={locale === 'fr'}
+        aria-label="Français"
         className={`px-2 py-1 text-[10px] font-bold rounded transition-colors ${
           locale === 'fr' ? 'bg-brand-gold text-brand-dark' : 'text-brand-muted hover:text-white'
         }`}

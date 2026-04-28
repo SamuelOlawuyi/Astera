@@ -39,10 +39,15 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         />
       </head>
       <body className="min-h-screen bg-[var(--bg)] text-[var(--text-primary)]">
+        <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:bg-brand-primary focus:text-white focus:p-2 focus:rounded">
+          Skip to main content
+        </a>
         <NextIntlClientProvider messages={messages}>
           <ThemeProvider>
             <Navbar />
-            <main>{children}</main>
+            <main id="main-content" role="main">
+              {children}
+            </main>
             <Toaster position="top-right" duration={5000} />
           </ThemeProvider>
         </NextIntlClientProvider>
