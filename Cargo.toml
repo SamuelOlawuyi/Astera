@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "contracts/invoice",
+    "contracts/pool", 
+    "contracts/credit_score",
+    "contracts/share",
+    "benchmarks",
+]
+resolver = "2"
+
+[workspace.dependencies]
+criterion = "0.5"
+soroban-sdk = { version = "22.0.0" }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true
