@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 const createPWA = require('@opensourceframework/next-pwa');
 const createNextIntlPlugin = require('next-intl/plugin');
 

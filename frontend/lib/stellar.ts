@@ -49,6 +49,84 @@ const RPC_POOL_CONFIG = {
   retryBaseDelay: 1_000,
 };
 
+const RPC_READ_LIMIT = {
+  maxConcurrent: 5,
+  maxStartsPerSecond: 10,
+  windowMs: 1_000,
+};
+
+type QueuedRead<T> = {
+  fn: () => Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+};
+
+const rpcReadQueue: QueuedRead<unknown>[] = [];
+const rpcReadStartTimes: number[] = [];
+let activeRpcReads = 0;
+let rpcReadTimer: ReturnType<typeof setTimeout> | null = null;
+
+function pruneReadStartTimes(now: number): void {
+  while (rpcReadStartTimes.length > 0 && now - rpcReadStartTimes[0] >= RPC_READ_LIMIT.windowMs) {
+    rpcReadStartTimes.shift();
+  }
+}
+
+function scheduleReadQueue(): void {
+  if (rpcReadTimer || rpcReadQueue.length === 0) return;
+
+  const now = Date.now();
+  pruneReadStartTimes(now);
+
+  if (rpcReadStartTimes.length < RPC_READ_LIMIT.maxStartsPerSecond) {
+    queueMicrotask(processReadQueue);
+    return;
+  }
+
+  const nextSlotIn = Math.max(0, RPC_READ_LIMIT.windowMs - (now - rpcReadStartTimes[0]));
+  rpcReadTimer = setTimeout(() => {
+    rpcReadTimer = null;
+    processReadQueue();
+  }, nextSlotIn);
+}
+
+function processReadQueue(): void {
+  rpcReadTimer = null;
+  const now = Date.now();
+  pruneReadStartTimes(now);
+
+  while (
+    activeRpcReads < RPC_READ_LIMIT.maxConcurrent &&
+    rpcReadQueue.length > 0 &&
+    rpcReadStartTimes.length < RPC_READ_LIMIT.maxStartsPerSecond
+  ) {
+    const task = rpcReadQueue.shift()!;
+    activeRpcReads++;
+    rpcReadStartTimes.push(Date.now());
+
+    task
+      .fn()
+      .then(task.resolve, task.reject)
+      .finally(() => {
+        activeRpcReads = Math.max(0, activeRpcReads - 1);
+        processReadQueue();
+      });
+  }
+
+  scheduleReadQueue();
+}
+
+export function readContract<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    rpcReadQueue.push({
+      fn,
+      resolve: resolve as (value: unknown) => void,
+      reject,
+    });
+    processReadQueue();
+  });
+}
+
 interface PooledConnection {
   server: StellarRpc.Server;
   createdAt: number;
@@ -123,7 +201,7 @@ class RpcConnectionPool {
     const currentUrl = this.connections[index]?.url || RPC_URL;
     const nextUrlIndex = (RPC_ENDPOINTS.indexOf(currentUrl) + 1) % RPC_ENDPOINTS.length;
     const nextUrl = RPC_ENDPOINTS[nextUrlIndex] || RPC_URL;
-    
+
     this.connections[index] = {
       server: new StellarRpc.Server(nextUrl),
       createdAt: now,
@@ -212,7 +290,21 @@ const rpcPool = new RpcConnectionPool();
 export const rpc = rpcPool.getConnection().server;
 
 /** Execute an RPC call with connection pooling, retry, and timeout */
-export const rpcExecute = rpcPool.execute.bind(rpcPool);
+export function rpcExecute<T>(fn: (server: StellarRpc.Server) => Promise<T>): Promise<T> {
+  return readContract(() => rpcPool.execute(fn));
+}
+
+export type RpcLatestLedger = Awaited<ReturnType<StellarRpc.Server['getLatestLedger']>>;
+export type RpcEventsRequest = Parameters<StellarRpc.Server['getEvents']>[0];
+export type RpcEventsResponse = Awaited<ReturnType<StellarRpc.Server['getEvents']>>;
+
+export function rpcGetLatestLedger(): Promise<RpcLatestLedger> {
+  return rpcExecute<RpcLatestLedger>((server) => server.getLatestLedger());
+}
+
+export function rpcGetEvents(request: RpcEventsRequest): Promise<RpcEventsResponse> {
+  return rpcExecute<RpcEventsResponse>((server) => server.getEvents(request));
+}
 
 // ---- Utility Functions ----
 
@@ -275,7 +367,8 @@ const EXPLORER_BASES: Record<StellarNetwork, string> = {
 export function explorerUrl(
   type: ExplorerEntity,
   id: string,
-  network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ?? 'testnet',
+  network: StellarNetwork = (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ??
+    'testnet',
 ): string {
   const base = EXPLORER_BASES[network] ?? EXPLORER_BASES.testnet;
   return `${base}/${type}/${encodeURIComponent(id)}`;
@@ -396,50 +489,80 @@ export function parseSimulationError(sim: unknown): string {
   return 'Transaction simulation failed. Please review inputs and try again.';
 }
 
+const pendingTransactions = new Set<string>();
+
+function transactionKey(tx: { hash?: () => Uint8Array | string }, signedXDR: string): string {
+  try {
+    const hash = tx.hash?.();
+    if (typeof hash === 'string') return hash;
+    if (hash instanceof Uint8Array) {
+      return Array.from(hash)
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+    }
+  } catch {
+    // Fall back to the signed payload when hashing is unavailable in tests.
+  }
+
+  return signedXDR;
+}
+
 /** Submit a signed XDR transaction */
 export async function submitTx(
   signedXDR: string,
   onProgress?: (progress: TransactionProgress) => void,
 ) {
-  return rpcExecute(async (server) => {
-    const tx = TransactionBuilder.fromXDR(signedXDR, NETWORK);
-    const response = await server.sendTransaction(tx);
+  const tx = TransactionBuilder.fromXDR(signedXDR, NETWORK);
+  const txKey = transactionKey(tx, signedXDR);
 
-    if (response.status === 'ERROR') {
-      const error = `Transaction failed: ${safeStringify(response)}`;
-      onProgress?.({ status: 'failed', hash: response.hash, error });
-      throw new Error(error);
-    }
+  if (pendingTransactions.has(txKey)) {
+    throw new Error('Transaction already in progress');
+  }
 
-    onProgress?.({ status: 'pending', hash: response.hash });
-    let result = await server.getTransaction(response.hash);
-    let attempts = 0;
+  pendingTransactions.add(txKey);
 
-    while (
-      (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') &&
-      attempts < 20
-    ) {
+  try {
+    return await rpcExecute(async (server) => {
+      const response = await server.sendTransaction(tx);
+
+      if (response.status === 'ERROR') {
+        const error = `Transaction failed: ${safeStringify(response)}`;
+        onProgress?.({ status: 'failed', hash: response.hash, error });
+        throw new Error(error);
+      }
+
       onProgress?.({ status: 'pending', hash: response.hash });
-      await new Promise((r) => setTimeout(r, 1500));
-      result = await server.getTransaction(response.hash);
-      attempts++;
-    }
+      let result = await server.getTransaction(response.hash);
+      let attempts = 0;
 
-    if (String(result.status) === 'FAILED') {
-      const error = 'Transaction failed on-chain';
-      onProgress?.({ status: 'failed', hash: response.hash, error });
-      throw new Error(error);
-    }
+      while (
+        (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') &&
+        attempts < 20
+      ) {
+        onProgress?.({ status: 'pending', hash: response.hash });
+        await new Promise((r) => setTimeout(r, 1500));
+        result = await server.getTransaction(response.hash);
+        attempts++;
+      }
 
-    if (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') {
-      const error = 'Transaction confirmation timed out';
-      onProgress?.({ status: 'failed', hash: response.hash, error });
-      throw new Error(error);
-    }
+      if (String(result.status) === 'FAILED') {
+        const error = 'Transaction failed on-chain';
+        onProgress?.({ status: 'failed', hash: response.hash, error });
+        throw new Error(error);
+      }
 
-    onProgress?.({ status: 'confirmed', hash: response.hash });
-    return result;
-  });
+      if (String(result.status) === 'NOT_FOUND' || String(result.status) === 'PENDING') {
+        const error = 'Transaction confirmation timed out';
+        onProgress?.({ status: 'failed', hash: response.hash, error });
+        throw new Error(error);
+      }
+
+      onProgress?.({ status: 'confirmed', hash: response.hash });
+      return result;
+    });
+  } finally {
+    pendingTransactions.delete(txKey);
+  }
 }
 
 export { nativeToScVal, scValToNative, Address, xdr };

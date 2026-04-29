@@ -1,5 +1,7 @@
 import {
-  rpc,
+  rpcExecute,
+  rpcGetEvents,
+  rpcGetLatestLedger,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
   GOVERNANCE_CONTRACT_ID,
@@ -33,6 +35,21 @@ import type {
 
 const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK === 'true';
 const MOCK_API_URL = process.env.NEXT_PUBLIC_MOCK_API_URL ?? 'http://localhost:4000';
+
+type RpcAccount = Awaited<ReturnType<StellarRpc.Server['getAccount']>>;
+type RpcBuiltTransaction = Parameters<StellarRpc.Server['simulateTransaction']>[0];
+
+function getRpcAccount(address: string): Promise<RpcAccount> {
+  return rpcExecute<RpcAccount>((server) => server.getAccount(address));
+}
+
+function simulateRpcTransaction(
+  tx: RpcBuiltTransaction,
+): Promise<StellarRpc.Api.SimulateTransactionResponse> {
+  return rpcExecute<StellarRpc.Api.SimulateTransactionResponse>((server) =>
+    server.simulateTransaction(tx),
+  );
+}
 
 async function mockFetch<T>(path: string): Promise<T> {
   const res = await fetch(`${MOCK_API_URL}${path}`);
@@ -116,7 +133,7 @@ export async function buildCreateInvoiceTx(params: {
   verificationHash?: string;
   metadataUri?: string;
 }): Promise<string> {
-  const account = await rpc.getAccount(params.owner);
+  const account = await getRpcAccount(params.owner);
   const contract = new Contract(INVOICE_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -140,7 +157,7 @@ export async function buildCreateInvoiceTx(params: {
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new ContractError(parseSimulationError(sim));
   }
@@ -153,7 +170,7 @@ export async function buildRenewInvoiceTtlTx(params: {
   operator: string;
   invoiceId: number;
 }): Promise<string> {
-  const account = await rpc.getAccount(params.operator);
+  const account = await getRpcAccount(params.operator);
   const contract = new Contract(INVOICE_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -164,7 +181,7 @@ export async function buildRenewInvoiceTtlTx(params: {
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -270,7 +287,7 @@ export async function buildDepositTx(
   token: string,
   amount: bigint,
 ): Promise<string> {
-  const account = await rpc.getAccount(investor);
+  const account = await getRpcAccount(investor);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -288,7 +305,7 @@ export async function buildDepositTx(
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -331,7 +348,7 @@ export async function buildInitCoFundingTx(params: {
   dueDate: number;
   token: string;
 }): Promise<string> {
-  const account = await rpc.getAccount(params.admin);
+  const account = await getRpcAccount(params.admin);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -352,7 +369,7 @@ export async function buildInitCoFundingTx(params: {
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -366,7 +383,7 @@ export async function buildCommitToInvoiceTx(params: {
   invoiceId: number;
   amount: bigint;
 }): Promise<string> {
-  const account = await rpc.getAccount(params.investor);
+  const account = await getRpcAccount(params.investor);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -384,7 +401,7 @@ export async function buildCommitToInvoiceTx(params: {
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -398,7 +415,7 @@ export async function buildRepayTx(params: {
   invoiceId: number;
   amount: bigint;
 }): Promise<string> {
-  const account = await rpc.getAccount(params.payer);
+  const account = await getRpcAccount(params.payer);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -416,7 +433,7 @@ export async function buildRepayTx(params: {
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -430,7 +447,7 @@ export async function buildWithdrawTx(
   token: string,
   amount: bigint,
 ): Promise<string> {
-  const account = await rpc.getAccount(investor);
+  const account = await getRpcAccount(investor);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -448,7 +465,7 @@ export async function buildWithdrawTx(
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -458,7 +475,7 @@ export async function buildWithdrawTx(
 }
 
 export async function buildSetYieldTx(admin: string, yieldBps: number): Promise<string> {
-  const account = await rpc.getAccount(admin);
+  const account = await getRpcAccount(admin);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -475,7 +492,7 @@ export async function buildSetYieldTx(admin: string, yieldBps: number): Promise<
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -488,7 +505,7 @@ export async function buildSetFactoringFeeTx(
   admin: string,
   factoringFeeBps: number,
 ): Promise<string> {
-  const account = await rpc.getAccount(admin);
+  const account = await getRpcAccount(admin);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -505,7 +522,7 @@ export async function buildSetFactoringFeeTx(
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -520,7 +537,7 @@ export async function buildSetFactoringFeeTx(
  * unless the contract admin is also the pool address stored in the invoice.
  */
 export async function buildMarkDefaultedTx(admin: string, invoiceId: number): Promise<string> {
-  const account = await rpc.getAccount(admin);
+  const account = await getRpcAccount(admin);
   const contract = new Contract(INVOICE_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -537,7 +554,7 @@ export async function buildMarkDefaultedTx(admin: string, invoiceId: number): Pr
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -552,7 +569,7 @@ export async function buildDisputeTx(params: {
   reason: string;
   oracleHash?: string;
 }): Promise<string> {
-  const account = await rpc.getAccount(params.disputer);
+  const account = await getRpcAccount(params.disputer);
   const contract = new Contract(INVOICE_CONTRACT_ID);
   const oracleHash = params.oracleHash ?? '';
 
@@ -573,7 +590,7 @@ export async function buildDisputeTx(params: {
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -596,11 +613,11 @@ export async function fetchKycInvestors(): Promise<{
   approved: KycInvestor[];
 }> {
   try {
-    const latestLedger = await rpc.getLatestLedger();
+    const latestLedger = await rpcGetLatestLedger();
     // Look back ~30 days (17280 * 30 ledgers) or as far as the RPC allows to find depositors
     const startLedger = Math.max(1, latestLedger.sequence - 17280 * 30);
 
-    const response = await rpc.getEvents({
+    const response = await rpcGetEvents({
       startLedger,
       filters: [{ contractIds: [POOL_CONTRACT_ID] }],
     });
@@ -685,7 +702,7 @@ export async function getInvestorKyc(investor: string): Promise<boolean> {
 }
 
 export async function buildSetKycRequiredTx(admin: string, required: boolean): Promise<string> {
-  const account = await rpc.getAccount(admin);
+  const account = await getRpcAccount(admin);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -702,7 +719,7 @@ export async function buildSetKycRequiredTx(admin: string, required: boolean): P
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -714,7 +731,7 @@ export async function buildSetInvestorKycTx(
   investor: string,
   approved: boolean,
 ): Promise<string> {
-  const account = await rpc.getAccount(admin);
+  const account = await getRpcAccount(admin);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -732,7 +749,7 @@ export async function buildSetInvestorKycTx(
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -757,7 +774,7 @@ export async function buildSetExchangeRateTx(
   token: string,
   rateBps: number,
 ): Promise<string> {
-  const account = await rpc.getAccount(admin);
+  const account = await getRpcAccount(admin);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -775,7 +792,7 @@ export async function buildSetExchangeRateTx(
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -898,7 +915,7 @@ export async function buildDepositCollateralTx(params: {
   token: string;
   amount: bigint;
 }): Promise<string> {
-  const account = await rpc.getAccount(params.depositor);
+  const account = await getRpcAccount(params.depositor);
   const contract = new Contract(POOL_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -917,7 +934,7 @@ export async function buildDepositCollateralTx(params: {
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -961,7 +978,7 @@ export async function buildCreateProposalTx(params: {
   functionName: string;
   calldata: string;
 }): Promise<string> {
-  const account = await rpc.getAccount(params.proposer);
+  const account = await getRpcAccount(params.proposer);
   const contract = new Contract(GOVERNANCE_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -980,7 +997,7 @@ export async function buildCreateProposalTx(params: {
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -992,7 +1009,7 @@ export async function buildVoteProposalTx(params: {
   proposalId: number;
   inFavor: boolean;
 }): Promise<string> {
-  const account = await rpc.getAccount(params.voter);
+  const account = await getRpcAccount(params.voter);
   const contract = new Contract(GOVERNANCE_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -1009,7 +1026,7 @@ export async function buildVoteProposalTx(params: {
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -1020,7 +1037,7 @@ export async function buildExecuteProposalTx(
   executor: string,
   proposalId: number,
 ): Promise<string> {
-  const account = await rpc.getAccount(executor);
+  const account = await getRpcAccount(executor);
   const contract = new Contract(GOVERNANCE_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -1031,7 +1048,7 @@ export async function buildExecuteProposalTx(
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }
@@ -1042,7 +1059,7 @@ export async function buildCancelProposalTx(
   cancelledBy: string,
   proposalId: number,
 ): Promise<string> {
-  const account = await rpc.getAccount(cancelledBy);
+  const account = await getRpcAccount(cancelledBy);
   const contract = new Contract(GOVERNANCE_CONTRACT_ID);
 
   const tx = new TransactionBuilder(account, {
@@ -1053,7 +1070,7 @@ export async function buildCancelProposalTx(
     .setTimeout(30)
     .build();
 
-  const sim = await rpc.simulateTransaction(tx);
+  const sim = await simulateRpcTransaction(tx);
   if (StellarRpc.Api.isSimulationError(sim)) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }

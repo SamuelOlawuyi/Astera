@@ -5,17 +5,77 @@ import { useStore } from '@/lib/store';
 import { monitorService, ContractEvent } from '@/lib/monitoring';
 import { notificationService, NotificationAlert } from '@/lib/notifications';
 import type { InvoiceTtlWarning } from '@/lib/types';
-import { buildRenewInvoiceTtlTx, submitTx } from '@/lib/contracts';
+import {
+  buildRenewInvoiceTtlTx,
+  submitTx,
+  getAcceptedTokens,
+  getPoolTokenTotals,
+} from '@/lib/contracts';
+import { stablecoinLabel } from '@/lib/stellar';
+import type { PoolTokenTotals } from '@/lib/types';
+
+interface TokenUtilization {
+  token: string;
+  label: string;
+  utilizationBps: number;
+}
+
+function UtilizationGauge({ token, label, utilizationBps }: TokenUtilization) {
+  const pct = Math.min(100, Math.round(utilizationBps / 100));
+  const color = pct >= 90 ? 'bg-red-500' : pct >= 80 ? 'bg-yellow-400' : 'bg-green-500';
+  const textColor = pct >= 90 ? 'text-red-400' : pct >= 80 ? 'text-yellow-400' : 'text-green-400';
+  return (
+    <div className="bg-brand-card border border-brand-border rounded-xl p-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-medium text-white">{label}</span>
+        <span className={`text-sm font-bold ${textColor}`}>{pct}%</span>
+      </div>
+      <div className="h-3 rounded-full bg-brand-border overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${color}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {pct >= 90 && (
+        <p className="text-xs text-red-400 mt-2 font-medium">
+          ⚠ Pool is at {pct}% utilization — consider pausing new commitments
+        </p>
+      )}
+      {pct >= 80 && pct < 90 && (
+        <p className="text-xs text-yellow-400 mt-2">High utilization — monitor closely</p>
+      )}
+    </div>
+  );
+}
 
 export default function MonitoringPage() {
   const { wallet } = useStore();
   const [events, setEvents] = useState<ContractEvent[]>([]);
   const [alerts, setAlerts] = useState<NotificationAlert[]>([]);
   const [ttlWarnings, setTtlWarnings] = useState<InvoiceTtlWarning[]>([]);
+  const [utilizations, setUtilizations] = useState<TokenUtilization[]>([]);
   const [isPolling, setIsPolling] = useState(false);
   const [lastCheck, setLastCheck] = useState<Date | null>(null);
   const [autoPoll, setAutoPoll] = useState(true);
   const [renewingId, setRenewingId] = useState<number | null>(null);
+
+  const fetchUtilizations = useCallback(async () => {
+    try {
+      const tokens = await getAcceptedTokens();
+      const rows = await Promise.all(
+        tokens.map(async (token) => {
+          const totals: PoolTokenTotals = await getPoolTokenTotals(token);
+          const deposited = Number(totals.totalDeposited);
+          const deployed = Number(totals.totalDeployed);
+          const utilizationBps = deposited > 0 ? Math.round((deployed / deposited) * 10_000) : 0;
+          return { token, label: stablecoinLabel(token), utilizationBps };
+        }),
+      );
+      setUtilizations(rows);
+    } catch {
+      // non-fatal
+    }
+  }, []);
 
   const fetchEvents = useCallback(async () => {
     setIsPolling(true);
@@ -27,23 +87,19 @@ export default function MonitoringPage() {
       }
       setTtlWarnings(warnings);
       setLastCheck(new Date());
+      await fetchUtilizations();
     } catch (error) {
       console.error('Polling error:', error);
     } finally {
       setIsPolling(false);
     }
-  }, []);
+  }, [fetchUtilizations]);
 
   async function renewInvoice(invoiceId: number) {
-    if (!wallet.connected || !wallet.address) {
-      return;
-    }
+    if (!wallet.connected || !wallet.address) return;
     setRenewingId(invoiceId);
     try {
-      const xdr = await buildRenewInvoiceTtlTx({
-        operator: wallet.address,
-        invoiceId,
-      });
+      const xdr = await buildRenewInvoiceTtlTx({ operator: wallet.address, invoiceId });
       const freighter = await import('@stellar/freighter-api');
       const { signedTxXdr, error } = await freighter.signTransaction(xdr, {
         networkPassphrase: 'Test SDF Network ; September 2015',
@@ -60,21 +116,17 @@ export default function MonitoringPage() {
   }
 
   useEffect(() => {
-    // Initial fetch
     fetchEvents();
-
-    // Subscribe to new alerts
     const unsubscribe = notificationService.subscribe((alert: NotificationAlert) => {
       setAlerts((prev: NotificationAlert[]) => [alert, ...prev].slice(0, 50));
     });
-
     return () => unsubscribe();
   }, [fetchEvents]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (autoPoll) {
-      interval = setInterval(fetchEvents, 30000); // 30s
+      interval = setInterval(fetchEvents, 30000);
     }
     return () => clearInterval(interval);
   }, [autoPoll, fetchEvents]);
@@ -140,6 +192,18 @@ export default function MonitoringPage() {
           <p className="text-xs text-brand-muted mt-2">Next check in ~30 seconds</p>
         </div>
       </div>
+
+      {/* #275: Pool Utilization Gauges */}
+      {utilizations.length > 0 && (
+        <div className="bg-brand-card border border-brand-border rounded-2xl p-6">
+          <h2 className="text-xl font-bold text-white mb-4">Pool Utilization</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {utilizations.map((u) => (
+              <UtilizationGauge key={u.token} {...u} />
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="bg-brand-card border border-brand-border rounded-2xl p-6">
         <div className="flex items-center justify-between gap-4 mb-4">

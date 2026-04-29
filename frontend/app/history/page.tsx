@@ -5,7 +5,8 @@ import toast from 'react-hot-toast';
 import { useStore } from '@/lib/store';
 import { HistoryEventSkeleton } from '@/components/Skeleton';
 import {
-  rpc,
+  rpcGetEvents,
+  rpcGetLatestLedger,
   INVOICE_CONTRACT_ID,
   POOL_CONTRACT_ID,
   scValToNative,
@@ -250,6 +251,8 @@ export default function HistoryPage() {
 
       try {
         let parsed: HistoryEvent[] = [];
+        let eventCount = 0;
+        let responseCursor: string | undefined;
 
         // Try indexer API first (Option A optimization from #240)
         if (INDEXER_URL) {
@@ -272,6 +275,7 @@ export default function HistoryPage() {
                 ledgerCloseAt: e.ledgerCloseAt,
                 txHash: e.txHash,
               }));
+              eventCount = raw.length;
               parsed = parseEvents(raw, wallet.address);
             }
           } catch (indexerErr) {
@@ -279,15 +283,14 @@ export default function HistoryPage() {
           }
         }
 
-        let responseCursor: string | undefined = undefined;
         let fetchedCount = parsed.length;
 
         // Fallback to Horizon RPC if indexer didn't work
         if (parsed.length === 0) {
-          const latest = await rpc.getLatestLedger();
+          const latest = await rpcGetLatestLedger();
           const startLedger = Math.max(1, latest.sequence - 500_000);
 
-          const response = await rpc.getEvents({
+          const response = await rpcGetEvents({
             ...(nextCursor ? { cursor: nextCursor } : { startLedger }),
             filters: [
               {
