@@ -5,7 +5,10 @@ import createNextIntlPlugin from 'next-intl/plugin';
 // those natives during config load, failing the entire build. In CI we keep
 // the config minimal and skip PWA wrapping.
 let withPWA = (config) => config;
-if (!process.env.CI) {
+const IS_CI =
+  process.env.CI === 'true' || process.env.CI === '1' || process.env.GITHUB_ACTIONS === 'true';
+
+if (!IS_CI) {
   try {
     const [{ default: nextPwa }, { default: runtimeCaching }] = await Promise.all([
       import('next-pwa'),
