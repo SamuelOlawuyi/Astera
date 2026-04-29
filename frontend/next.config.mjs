@@ -1,5 +1,7 @@
 import withPWA from '@ducanh2912/next-pwa';
 import createNextIntlPlugin from 'next-intl/plugin';
+import withPWA from 'next-pwa';
+import runtimeCaching from 'next-pwa/cache.js';
 
 const withPWAConfig = withPWA({
   dest: 'public',
