@@ -115,6 +115,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
+        env:
+          # Some runners/environments set `omit=optional`, which prevents
+          # platform bindings (e.g. @parcel/watcher-linux-x64-glibc) from being
+          # installed and can break Next builds while loading config.
+          NPM_CONFIG_OMIT: ""
+          npm_config_optional: "true"
         run: npm ci --include=optional
 
       - name: Run ESLint
