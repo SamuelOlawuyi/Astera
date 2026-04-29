@@ -1,3 +1,5 @@
+import { getFreighter } from '@/lib/freighter';
+
 const TOKEN_KEY = 'astera_jwt';
 
 export function setToken(token: string) {
@@ -43,7 +45,7 @@ export async function ensureAuthWithFreighter(address: string) {
     if (!challenge || !challenge.transaction) return { error: 'no_challenge' };
 
     // ask freighter to sign
-    const freighter = await import('@stellar/freighter-api');
+    const freighter = await getFreighter();
     const { signed_envelope_xdr, error } = await freighter
       .signTransaction(challenge.transaction, {
         networkPassphrase: String(challenge.network_passphrase ?? ''),

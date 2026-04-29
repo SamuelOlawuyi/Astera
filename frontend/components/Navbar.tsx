@@ -183,91 +183,91 @@ export default function Navbar() {
         </div>
       </header>
 
-      {/*
-        Backdrop — sibling of <header> so it escapes the header's stacking
-        context. z-[60] sits above the header (z-50) and below the drawer.
-      */}
-      <div
-        onClick={() => setDrawerOpen(false)}
-        aria-hidden="true"
-        className={`fixed inset-0 z-[60] bg-black/60 transition-opacity duration-300 md:hidden ${
-          drawerOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-        }`}
-      />
-
-      {/*
-        Drawer — slides in from the right. z-[70] keeps it above the backdrop.
-        Both the backdrop and drawer are hidden on md+ so desktop is unaffected.
-      */}
-      <aside
-        id="mobile-nav"
-        role="dialog"
-        aria-label="Navigation menu"
-        aria-modal="true"
-        className={`fixed top-0 right-0 z-[70] h-full w-72 bg-brand-navy border-l border-brand-border flex flex-col transition-transform duration-300 ease-in-out md:hidden ${
-          drawerOpen ? 'translate-x-0' : 'translate-x-full'
-        }`}
-      >
-        {/* Drawer header */}
-        <div className="flex items-center justify-between px-6 h-16 border-b border-brand-border shrink-0">
-          <span className="font-bold text-xl gradient-text">Astera</span>
-          <button
+      {drawerOpen && (
+        <>
+          {/*
+            Backdrop — sibling of <header> so it escapes the header's stacking
+            context. z-[60] sits above the header (z-50) and below the drawer.
+          */}
+          <div
             onClick={() => setDrawerOpen(false)}
-            aria-label="Close menu"
-            className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-brand-muted hover:text-white hover:bg-brand-card transition-colors"
+            aria-hidden="true"
+            className="fixed inset-0 z-[60] bg-black/60 md:hidden"
+          />
+
+          {/*
+            Drawer — slides in from the right. z-[70] keeps it above the backdrop.
+            Both the backdrop and drawer are hidden on md+ so desktop is unaffected.
+          */}
+          <aside
+            id="mobile-nav"
+            role="dialog"
+            aria-label="Navigation menu"
+            aria-modal="true"
+            className="fixed top-0 right-0 z-[70] h-full w-72 bg-brand-navy border-l border-brand-border flex flex-col md:hidden"
           >
-            <svg
-              width="18"
-              height="18"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              aria-hidden="true"
-            >
-              <line x1="2" y1="2" x2="16" y2="16" />
-              <line x1="16" y1="2" x2="2" y2="16" />
-            </svg>
-          </button>
-        </div>
+            {/* Drawer header */}
+            <div className="flex items-center justify-between px-6 h-16 border-b border-brand-border shrink-0">
+              <span className="font-bold text-xl gradient-text">Astera</span>
+              <button
+                onClick={() => setDrawerOpen(false)}
+                aria-label="Close menu"
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-brand-muted hover:text-white hover:bg-brand-card transition-colors"
+              >
+                <svg
+                  width="18"
+                  height="18"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  aria-hidden="true"
+                >
+                  <line x1="2" y1="2" x2="16" y2="16" />
+                  <line x1="16" y1="2" x2="2" y2="16" />
+                </svg>
+              </button>
+            </div>
 
-        {/* Nav links */}
-        <nav className="flex flex-col gap-1 p-4 flex-1">
-          {links.map((l) => (
-            <Link
-              key={l.href}
-              href={l.href}
-              className={`px-4 py-3 rounded-xl text-sm font-medium transition-colors min-h-[44px] flex items-center ${
-                path === l.href
-                  ? 'bg-brand-gold/10 text-brand-gold'
-                  : 'text-brand-muted hover:text-white hover:bg-brand-card'
-              }`}
-            >
-              {l.label}
-            </Link>
-          ))}
+            {/* Nav links */}
+            <nav className="flex flex-col gap-1 p-4 flex-1">
+              {links.map((l) => (
+                <Link
+                  key={l.href}
+                  href={l.href}
+                  className={`px-4 py-3 rounded-xl text-sm font-medium transition-colors min-h-[44px] flex items-center ${
+                    path === l.href
+                      ? 'bg-brand-gold/10 text-brand-gold'
+                      : 'text-brand-muted hover:text-white hover:bg-brand-card'
+                  }`}
+                >
+                  {l.label}
+                </Link>
+              ))}
 
-          <Link
-            href="/settings/notifications"
-            className={`px-4 py-3 rounded-xl text-sm font-medium transition-colors min-h-[44px] flex items-center ${
-              path === '/settings/notifications'
-                ? 'bg-brand-gold/10 text-brand-gold'
-                : 'text-brand-muted hover:text-white hover:bg-brand-card'
-            }`}
-          >
-            Notification settings
-          </Link>
-        </nav>
+              <Link
+                href="/settings/notifications"
+                className={`px-4 py-3 rounded-xl text-sm font-medium transition-colors min-h-[44px] flex items-center ${
+                  path === '/settings/notifications'
+                    ? 'bg-brand-gold/10 text-brand-gold'
+                    : 'text-brand-muted hover:text-white hover:bg-brand-card'
+                }`}
+              >
+                Notification settings
+              </Link>
+            </nav>
 
-        {/* Wallet connect + theme toggle */}
-        <div className="p-6 border-t border-brand-border shrink-0 flex flex-col gap-3">
-          <WalletConnect />
-          <div className="flex items-center gap-2 text-sm text-brand-muted">
-            <ThemeToggle />
-            <span>{t('toggleTheme')}</span>
-          </div>
-        </div>
-      </aside>
+            {/* Wallet connect + theme toggle */}
+            <div className="p-6 border-t border-brand-border shrink-0 flex flex-col gap-3">
+              <WalletConnect />
+              <div className="flex items-center gap-2 text-sm text-brand-muted">
+                <ThemeToggle />
+                <span>{t('toggleTheme')}</span>
+              </div>
+            </div>
+          </aside>
+        </>
+      )}
     </>
   );
 }

@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "start:e2e": "next build && next start",
     "lint": "eslint .",
     "format": "prettier --write .",
     "prepare": "cd .. && git config core.hooksPath frontend/.husky",

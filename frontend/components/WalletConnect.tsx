@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useStore, getStoredWalletAddress } from '@/lib/store';
 import { getEnvConfig } from '@/lib/env';
+import { getFreighter } from '@/lib/freighter';
 import toast from 'react-hot-toast';
 import { truncateAddress } from '@/lib/stellar';
 import LoadingSpinner from '@/components/LoadingSpinner';
@@ -25,7 +26,7 @@ async function checkNetworkMismatch(): Promise<{
   appNetwork: string | null;
 }> {
   try {
-    const freighter = await import('@stellar/freighter-api');
+    const freighter = await getFreighter();
     const { network } = await freighter.getNetwork();
     const envConfig = getEnvConfig();
     const appNetwork = envConfig.NEXT_PUBLIC_NETWORK;
@@ -62,7 +63,7 @@ export default function WalletConnect() {
 
     void (async () => {
       try {
-        const freighter = await import('@stellar/freighter-api');
+        const freighter = await getFreighter();
         const { isConnected } = await freighter.isConnected();
         if (!isConnected) return;
 
@@ -88,7 +89,7 @@ export default function WalletConnect() {
     setStep('detecting');
     setInlineError(null);
     try {
-      const freighter = await import('@stellar/freighter-api');
+      const freighter = await getFreighter();
 
       const { isConnected } = await freighter.isConnected();
       if (!isConnected) {
