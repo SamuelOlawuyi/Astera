@@ -121,7 +121,10 @@ jobs:
           # installed and can break Next builds while loading config.
           NPM_CONFIG_OMIT: ""
           npm_config_optional: "true"
-        run: npm ci --include=optional
+        run: |
+          npm config set optional true
+          npm config set omit ""
+          npm ci --include=optional
 
       - name: Run ESLint
         run: npm run lint
