@@ -1,6 +1,15 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
+// === AUTHORIZED CALLERS ===
+// - Admin: initialize(), admin-only setters
+// - Pool contract: mark_funded(), mark_paid(), mark_defaulted()
+// - Oracle: mark_verified(), mark_disputed()
+// - Anyone: read-only view functions (e.g., get_invoice)
+
+extern crate alloc;
+use alloc::string::ToString;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     String, Symbol, Vec,
