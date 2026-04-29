@@ -1,4 +1,4 @@
-import { rpc, INVOICE_CONTRACT_ID, POOL_CONTRACT_ID, scValToNative } from './stellar';
+import { rpcGetEvents, rpcGetLatestLedger, INVOICE_CONTRACT_ID, POOL_CONTRACT_ID, scValToNative } from './stellar';
 import { getInvoiceCount, getMultipleInvoices } from './contracts';
 import { notificationService } from './notifications';
 import {
@@ -53,14 +53,14 @@ class ContractMonitor {
 
     try {
       // 1. Fetch current latest ledger
-      const latestLedger = await rpc.getLatestLedger();
+      const latestLedger = await rpcGetLatestLedger();
       const startLedger = this.lastLedger || latestLedger.sequence - 100; // Look back 100 ledgers if no checkpoint
       const endLedger = latestLedger.sequence;
 
       console.log(`[Astera Monitor] Polling ledgers ${startLedger} to ${endLedger}`);
 
       // 2. Query Events for both contracts
-      const response = await rpc.getEvents({
+      const response = await rpcGetEvents({
         startLedger,
         filters: [{ contractIds: [INVOICE_CONTRACT_ID, POOL_CONTRACT_ID] }],
       });
@@ -94,7 +94,7 @@ class ContractMonitor {
     if (!INVOICE_CONTRACT_ID) return [];
 
     try {
-      const latestLedger = await rpc.getLatestLedger();
+      const latestLedger = await rpcGetLatestLedger();
       const count = await getInvoiceCount();
       if (count <= 0) return [];
 

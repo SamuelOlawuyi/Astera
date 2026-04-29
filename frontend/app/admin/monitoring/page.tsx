@@ -544,10 +544,14 @@ export default function MonitoringPage() {
                 </p>
                 <button
                   onClick={() => void renewInvoice(warning.id)}
-                  disabled={!wallet.connected || renewingId === warning.id}
+                  disabled={!wallet.connected || renewingId !== null}
                   className="mt-3 w-full rounded-lg border border-brand-border px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
                 >
-                  {renewingId === warning.id ? 'Renewing...' : 'Renew TTL'}
+                  {renewingId === warning.id
+                    ? 'Renewing...'
+                    : renewingId !== null
+                      ? 'Transaction in progress...'
+                      : 'Renew TTL'}
                 </button>
               </div>
             ))}
