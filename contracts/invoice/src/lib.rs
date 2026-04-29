@@ -3,6 +3,8 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, String,
     Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    String, Symbol, Vec,
 };
 
 use soroban_sdk::contractclient;
@@ -135,7 +137,11 @@ fn parse_version() -> ContractVersion {
         .and_then(|s| s.split('-').next()) // strip pre-release suffix
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    ContractVersion { major, minor, patch }
+    ContractVersion {
+        major,
+        minor,
+        patch,
+    }
 }
 
 /// Current migration level — bump when a schema migration runs.
@@ -250,6 +256,10 @@ fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
         return false;
     }
     true // Stubbed to allow build
+fn is_valid_metadata_uri(env: &Env, uri: &String) -> bool {
+    let _ = env;
+    let len = uri.len();
+    len > 0 && len <= MAX_METADATA_URI_LEN
 }
 
 fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
@@ -261,6 +271,31 @@ fn set_invoice_ttl(env: &Env, id: u64, is_completed: bool) {
     env.storage()
         .persistent()
         .extend_ttl(&DataKey::Invoice(id), ttl, ttl);
+}
+
+fn invoice_ttl_ledger_expiry(env: &Env, is_completed: bool) -> u64 {
+    let ttl = if is_completed {
+        COMPLETED_INVOICE_TTL as u64
+    } else {
+        ACTIVE_INVOICE_TTL as u64
+    };
+    u64::from(env.ledger().sequence()).saturating_add(ttl)
+}
+
+fn is_terminal_invoice_status(status: &InvoiceStatus) -> bool {
+    matches!(
+        status,
+        InvoiceStatus::Paid
+            | InvoiceStatus::Defaulted
+            | InvoiceStatus::Cancelled
+            | InvoiceStatus::Expired
+    )
+}
+
+fn renew_invoice_ttl(env: &Env, id: u64, status: &InvoiceStatus) -> u64 {
+    let is_completed = is_terminal_invoice_status(status);
+    set_invoice_ttl(env, id, is_completed);
+    invoice_ttl_ledger_expiry(env, is_completed)
 }
 
 /// Writes decimal digits of `n` into `buf` (left-aligned), returns digit count.
@@ -363,9 +398,10 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::ExpirationDurationSecs, &expiration_duration_secs);
-        env.storage()
-            .instance()
-            .set(&DataKey::DisputeResolutionWindow, &DEFAULT_DISPUTE_RESOLUTION_WINDOW);
+        env.storage().instance().set(
+            &DataKey::DisputeResolutionWindow,
+            &DEFAULT_DISPUTE_RESOLUTION_WINDOW,
+        );
         // Store compile-time version (#237)
         env.storage()
             .instance()
@@ -702,6 +738,12 @@ impl InvoiceContract {
         daily_count += 1;
         env.storage().instance().set(&daily_count_key, &daily_count);
 
+        if let Some(uri) = metadata_uri.clone() {
+            if !is_valid_metadata_uri(&env, &uri) {
+                panic!("invalid metadata uri");
+            }
+        }
+
         let count: u64 = env
             .storage()
             .instance()
@@ -851,7 +893,8 @@ impl InvoiceContract {
         set_invoice_ttl(&env, id, false);
 
         if approved {
-            env.events().publish((EVT, symbol_short!("verified")), (id, oracle_hash));
+            env.events()
+                .publish((EVT, symbol_short!("verified")), (id, oracle_hash));
         } else {
             env.events().publish((EVT, symbol_short!("disputed")), id);
         }
@@ -923,10 +966,8 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
 
-        env.events().publish(
-            (EVT, symbol_short!("resolved")),
-            (id, resolution, caller),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("resolved")), (id, resolution, caller));
     }
 
     pub fn set_dispute_window(env: Env, admin: Address, window: u64) {
@@ -1208,6 +1249,38 @@ impl InvoiceContract {
         env.events().publish((EVT, symbol_short!("cleanup")), id);
     }
 
+    /// Renew the storage TTL for an invoice.
+    ///
+    /// Active invoices receive the longer renewal window, while terminal
+    /// invoices keep the short post-settlement retention period.
+    pub fn renew_ttl(env: Env, id: u64) -> u64 {
+        bump_instance(&env);
+        let invoice = load_invoice(&env, id);
+        let new_expiry_ledger = renew_invoice_ttl(&env, id, &invoice.status);
+        env.events()
+            .publish((EVT, symbol_short!("ttl_ren")), (id, new_expiry_ledger));
+        new_expiry_ledger
+    }
+
+    /// Renew TTLs for multiple invoices in a single call.
+    pub fn batch_renew_ttl(env: Env, ids: Vec<u64>) -> Vec<u64> {
+        bump_instance(&env);
+        if ids.len() > 20 {
+            panic!("batch_renew_ttl: max 20 IDs per call");
+        }
+
+        let mut renewed: Vec<u64> = Vec::new(&env);
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            let invoice = load_invoice(&env, id);
+            let expiry = renew_invoice_ttl(&env, id, &invoice.status);
+            env.events()
+                .publish((EVT, symbol_short!("ttl_ren")), (id, expiry));
+            renewed.push_back(expiry);
+        }
+        renewed
+    }
+
     pub fn get_invoice(env: Env, id: u64) -> Invoice {
         bump_instance(&env);
         let inv = load_invoice(&env, id);
@@ -1299,8 +1372,7 @@ impl InvoiceContract {
         stats.active_invoices = stats.active_invoices.saturating_sub(1);
         env.storage().instance().set(&DataKey::StorageStats, &stats);
 
-        env.events()
-            .publish((EVT, symbol_short!("expired")), id);
+        env.events().publish((EVT, symbol_short!("expired")), id);
 
         true
     }
@@ -1463,10 +1535,8 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
 
-        env.events().publish(
-            (EVT, symbol_short!("gp_upd")),
-            (id, old_days, days),
-        );
+        env.events()
+            .publish((EVT, symbol_short!("gp_upd")), (id, old_days, days));
     }
 
     /// Get the effective grace period for a specific invoice (#230).
@@ -1880,14 +1950,9 @@ mod test {
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::AwaitingVerification);
 
-        client.verify_invoice(
-            &id,
-            &oracle,
-            &true,
-            &String::from_str(&env, ""),
-            &hash,
-        )
-        .unwrap();
+        client
+            .verify_invoice(&id, &oracle, &true, &String::from_str(&env, ""), &hash)
+            .unwrap();
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::Verified);
         assert!(invoice.oracle_verified);
@@ -1946,13 +2011,8 @@ mod test {
         );
 
         let zero_hash = String::from_str(&env, "");
-        let result = client.try_verify_invoice(
-            &id,
-            &oracle,
-            &true,
-            &String::from_str(&env, ""),
-            &zero_hash,
-        );
+        let result =
+            client.try_verify_invoice(&id, &oracle, &true, &String::from_str(&env, ""), &zero_hash);
 
         assert!(result.is_err());
     }
@@ -1977,14 +2037,9 @@ mod test {
         );
 
         let reason = String::from_str(&env, "Invalid invoice data");
-        client.verify_invoice(
-            &id,
-            &oracle,
-            &false,
-            &reason,
-            &String::from_str(&env, ""),
-        )
-        .unwrap();
+        client
+            .verify_invoice(&id, &oracle, &false, &reason, &String::from_str(&env, ""))
+            .unwrap();
         let invoice = client.get_invoice(&id);
         assert_eq!(invoice.status, InvoiceStatus::Disputed);
 
@@ -2986,14 +3041,7 @@ mod test {
     }
 
     /// Helper: initialise a contract and produce a single funded invoice (id=1).
-    fn setup_funded_invoice(
-        env: &Env,
-    ) -> (
-        InvoiceContractClient<'_>,
-        Address,
-        Address,
-        Address,
-    ) {
+    fn setup_funded_invoice(env: &Env) -> (InvoiceContractClient<'_>, Address, Address, Address) {
         let contract_id = env.register(InvoiceContract, ());
         let client = InvoiceContractClient::new(env, &contract_id);
 
@@ -3014,14 +3062,15 @@ mod test {
         );
 
         // Verify and fund so the invoice reaches Funded status.
-        client.verify_invoice(
-            &id,
-            &oracle,
-            &true,
-            &String::from_str(env, ""),
-            &String::from_str(env, "hash"),
-        )
-        .unwrap();
+        client
+            .verify_invoice(
+                &id,
+                &oracle,
+                &true,
+                &String::from_str(env, ""),
+                &String::from_str(env, "hash"),
+            )
+            .unwrap();
         client.mark_funded(&id, &pool);
 
         (client, admin, pool, owner)
