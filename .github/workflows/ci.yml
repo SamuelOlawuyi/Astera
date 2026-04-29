@@ -135,10 +135,15 @@ jobs:
             npm i --no-save "@next/swc-linux-x64-gnu@${NEXT_VERSION}"
             node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok after fallback')"
           fi
+          # Ensure the SWC JS wrapper is installed (some Next versions resolve through it).
+          npm i --no-save "@next/swc@${NEXT_VERSION}"
+          node -e "require('@next/swc'); console.log('next swc wrapper ok')"
           # Some CI runners end up with a partially-installed SWC native package.
           # Rebuild to ensure the binary is present and loadable.
           npm rebuild @next/swc-linux-x64-gnu --foreground-scripts || true
           node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok after rebuild')"
+          npm rebuild @next/swc --foreground-scripts || true
+          node -e "require('@next/swc'); console.log('next swc wrapper ok after rebuild')"
 
           # Ensure Parcel watcher native binding is present (some tooling relies on it).
           if node -e "require('@parcel/watcher'); console.log('parcel watcher ok')"; then
