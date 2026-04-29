@@ -89,14 +89,9 @@ pub enum PoolError {
     WithdrawalRequestNotFound = 21,
     AlreadyQueuedForWithdrawal = 22,
     InvalidRequestId = 23,
-    // Insurance reserve errors
-    InsufficientReserve = 26,
-    InvalidReserveRatio = 27,
-    // Missing error variants used in code
-    TokenHasActiveBalances = 28,
-    TokenHasDeployedCapital = 29,
-    YieldProposalNotFound = 30,
-    YieldChangeNotReady = 31,
+    // #287: upgrade exit window
+    UpgradeExitWindowActive = 25,
+    TokenDepositCapReached = 26,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -129,6 +124,8 @@ const COMPLETED_INVOICE_TTL: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 30;
 const INSTANCE_LIFETIME_THRESHOLD: u32 = LEDGERS_PER_DAY * 7;
 const UPGRADE_TIMELOCK_SECS: u64 = 86400; // 24 hours
+// #287: fee-free withdrawal window after protocol upgrades
+const DEFAULT_UPGRADE_EXIT_WINDOW_SECS: u64 = 259_200; // 72 hours
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -162,8 +159,8 @@ pub struct PoolConfig {
     // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
     pub max_single_withdrawal_bps: u32,
     pub withdrawal_cooldown_secs: u64,
-    // Insurance reserve: fraction of factoring fees directed to reserve (bps, default 500 = 5%)
-    pub reserve_ratio_bps: u32,
+    // #287: upgrade exit window
+    pub upgrade_exit_window_secs: u64,
 }
 
 #[contracttype]
@@ -299,6 +296,7 @@ pub enum DataKey {
     Paused,
     ProposedWasmHash,
     UpgradeScheduledAt,
+    UpgradeExitWindowEnd,
     // #111: exchange rate for each accepted token (bps of USD, e.g. 10000 = 1:1 USD)
     ExchangeRate(Address),
     ExchangeRateBounds(Address),
@@ -594,11 +592,10 @@ impl FundingPool {
             // #233: maximum single-investor concentration (2000 = 20%)
             max_single_investor_bps: DEFAULT_MAX_SINGLE_INVESTOR_BPS,
             // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
-            max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
-            withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
-            // Insurance reserve: default 5% of factoring fees
-            reserve_ratio_bps: DEFAULT_RESERVE_RATIO_BPS,
-        };
+    max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
+    withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
+    upgrade_exit_window_secs: DEFAULT_UPGRADE_EXIT_WINDOW_SECS,
+};
 
         let mut tokens: Vec<Address> = Vec::new(&env);
         tokens.push_back(initial_token.clone());
@@ -952,7 +949,8 @@ impl FundingPool {
         let config = get_config_cached(&env)?;
         let now = env.ledger().timestamp();
         let is_admin = config.admin == investor;
-        if !is_admin && config.withdrawal_cooldown_secs > 0 {
+        let in_upgrade_window = Self::is_in_upgrade_exit_window(env.clone());
+        if !is_admin && !in_upgrade_window && config.withdrawal_cooldown_secs > 0 {
             let last: u64 = env
                 .storage()
                 .persistent()
@@ -1000,7 +998,7 @@ impl FundingPool {
         }
 
         // #244: single-withdrawal cap (skip for admin)
-        if !is_admin && config.max_single_withdrawal_bps < BPS_DENOM {
+        if !is_admin && !in_upgrade_window && config.max_single_withdrawal_bps < BPS_DENOM {
             let max_single =
                 (tt.pool_value * config.max_single_withdrawal_bps as i128) / BPS_DENOM as i128;
             if amount > max_single {
@@ -1126,7 +1124,6 @@ impl FundingPool {
             // Store individual request for lookup
             let request_key = DataKey::WithdrawalRequest(investor.clone(), request_id);
             env.storage().persistent().set(&request_key, &request);
-
             env.events().publish(
                 (EVT, symbol_short!("withdrawal_queued")),
                 (investor, shares, request_id),
@@ -1171,7 +1168,6 @@ impl FundingPool {
 
         // Remove individual request
         env.storage().persistent().remove(&request_key);
-
         env.events().publish(
             (EVT, symbol_short!("withdrawal_cancelled")),
             (investor, request_id),
@@ -1378,6 +1374,9 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
+        if Self::is_in_upgrade_exit_window(env.clone()) {
+            return Err(PoolError::UpgradeExitWindowActive);
+        }
         let config = get_config_cached(&env)?;
         if env
             .storage()
@@ -1446,6 +1445,9 @@ impl FundingPool {
         bump_instance(&env);
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin)?;
+        if Self::is_in_upgrade_exit_window(env.clone()) {
+            return Err(PoolError::UpgradeExitWindowActive);
+        }
         if requests.len() == 0 {
             return Err(PoolError::InvalidAmount);
         }
@@ -1921,7 +1923,7 @@ impl FundingPool {
 
         let effective_at = now + config.yield_timelock_secs;
         env.events().publish(
-            (EVT, symbol_short!("yield_prop")),
+            (EVT, Symbol::new(&env, "yield_prop")),
             (admin, current, new_yield_bps, effective_at),
         );
         Ok(())
@@ -1976,7 +1978,7 @@ impl FundingPool {
         env.storage().instance().set(&DataKey::Config, &config);
 
         env.events()
-            .publish((EVT, symbol_short!("yield_cncl")), admin);
+            .publish((EVT, Symbol::new(&env, "yield_cncl")), admin);
         Ok(())
     }
 
@@ -2085,11 +2087,11 @@ impl FundingPool {
         let mut removed = false;
         for i in 0..tier_ids.len() {
             let existing_id = tier_ids.get(i).expect("storage corrupted");
-            if *existing_id == tier_id {
+            if existing_id == tier_id {
                 removed = true;
                 continue;
             }
-            new_ids.push_back(*existing_id);
+            new_ids.push_back(existing_id);
         }
         if !removed {
             return Err(PoolError::FeeTierNotFound);
@@ -2114,8 +2116,8 @@ impl FundingPool {
             .unwrap_or(Vec::new(&env));
         for i in 0..tier_ids.len() {
             let tier_id = tier_ids.get(i).expect("storage corrupted");
-            if let Some(tier) = env.storage().instance().get(&DataKey::FeeTier(*tier_id)) {
-                result.push_back((*tier_id, tier));
+            if let Some(tier) = env.storage().instance().get(&DataKey::FeeTier(tier_id)) {
+                result.push_back((tier_id, tier));
             }
         }
         result
@@ -2550,6 +2552,35 @@ impl FundingPool {
             .unwrap_or_default()
     }
 
+    pub fn get_position(env: Env, investor: Address, token: Address) -> Option<InvestorPosition> {
+        bump_instance(&env);
+        let pos_key = DataKey::InvestorPosition(investor, token);
+        env.storage().persistent().get(&pos_key)
+    }
+
+    pub fn is_invoice_repaid(env: Env, invoice_id: u64) -> bool {
+        let record: FundedInvoice = match env.storage().persistent().get(&DataKey::FundedInvoice(invoice_id)) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        let config: PoolConfig = match get_config_cached(&env) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        let now = env.ledger().timestamp();
+        let elapsed_secs = now - record.funded_at;
+        let total_interest = calculate_interest(
+            record.principal as u128,
+            config.yield_bps,
+            elapsed_secs,
+            config.compound_interest,
+        );
+        let total_due = record.principal + total_interest as i128 + record.factoring_fee;
+        record.repaid_amount >= total_due
+    }
+
     pub fn cleanup_funded_invoice(env: Env, admin: Address, invoice_id: u64) -> PoolResult<()> {
         admin.require_auth();
         bump_instance(&env);
@@ -2834,9 +2865,42 @@ impl FundingPool {
             .get(&DataKey::ProposedWasmHash)
             .ok_or(PoolError::NotInitialized)?;
         env.deployer().update_current_contract_wasm(wasm_hash);
+        
+        // #287: Set the upgrade exit window end time
+        let config = get_config_cached(&env)?;
+        let exit_window_end = now + config.upgrade_exit_window_secs;
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeExitWindowEnd, &exit_window_end);
+
         env.events()
-            .publish((EVT, symbol_short!("upgraded")), (admin, now));
+            .publish((EVT, symbol_short!("upgraded")), (admin.clone(), now));
+        env.events()
+            .publish((EVT, Symbol::new(&env, "upgrade_exit_window_started")), exit_window_end);
         Ok(())
+    }
+
+    pub fn set_upgrade_exit_window_secs(env: Env, admin: Address, secs: u64) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        let mut config = get_config_cached(&env)?;
+        config.upgrade_exit_window_secs = secs;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_upg_w")), (admin, secs));
+        Ok(())
+    }
+
+    pub fn is_in_upgrade_exit_window(env: Env) -> bool {
+        bump_instance(&env);
+        let end: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeExitWindowEnd)
+            .unwrap_or(0);
+        env.ledger().timestamp() < end
     }
 
     // ---- Internal utility methods ----
@@ -2998,7 +3062,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 100_000); // 100k secs
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         // Wait, 5000 principal at 8% APY for 100k secs.
@@ -3048,7 +3112,7 @@ mod test {
                 / (BPS_DENOM as u128 * SECS_PER_YEAR as u128);
         let expected_total_due = principal + expected_interest as i128 + expected_fee;
 
-        assert_eq!(client.estimate_repayment(&1u64), expected_total_due);
+        assert_eq!(client.estimate_repayment(&1u64).unwrap(), expected_total_due);
 
         client.repay_invoice(&1u64, &sme, &expected_total_due);
 
@@ -3286,7 +3350,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
         // Second repay must return AlreadyFullyRepaid
         let result = client.try_repay_invoice(&1u64, &sme, &amount_due);
@@ -3711,7 +3775,7 @@ mod test {
 
         let sme_balance_before = token::Client::new(&env, &usdc_id).balance(&sme);
 
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         let sme_balance_after = token::Client::new(&env, &usdc_id).balance(&sme);
@@ -3836,7 +3900,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
 
         // Trying to seize after repayment must return AlreadyFullyRepaid
@@ -4103,7 +4167,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
         let attacker = Address::generate(&env);
         let result = client.try_cleanup_funded_invoice(&attacker, &1u64);
@@ -4155,7 +4219,7 @@ mod test {
             &usdc_id,
         );
         client.pause(&admin);
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
     }
 
@@ -4199,7 +4263,7 @@ mod test {
             &(env.ledger().timestamp() + 10_000),
             &usdc_id,
         );
-        let amount_due = client.estimate_repayment(&1u64);
+        let amount_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &amount_due);
         let fi = client.get_funded_invoice(&1u64).unwrap();
         assert!(fi.repaid_amount >= amount_due);
@@ -4378,7 +4442,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 10_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64).unwrap();
         let half = total_due / 2;
 
         // First partial payment
@@ -4391,7 +4455,7 @@ mod test {
         assert_eq!(tt.total_deployed, 5_000i128);
 
         // Second payment clears the rest
-        let remaining = client.estimate_repayment(&1u64);
+        let remaining = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &remaining);
 
         let fi2 = client.get_funded_invoice(&1u64).unwrap();
@@ -4424,7 +4488,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64).unwrap();
 
         // Partial payment — less than total
         client.repay_invoice(&1u64, &sme, &(total_due / 3));
@@ -4458,7 +4522,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64).unwrap();
 
         // Attempt to pay more than due
         let result = client.try_repay_invoice(&1u64, &sme, &(total_due + 1));
@@ -4487,7 +4551,7 @@ mod test {
         );
 
         env.ledger().with_mut(|l| l.timestamp += 5_000);
-        let total_due = client.estimate_repayment(&1u64);
+        let total_due = client.estimate_repayment(&1u64).unwrap();
         client.repay_invoice(&1u64, &sme, &total_due);
 
         // Second full repayment must be rejected
