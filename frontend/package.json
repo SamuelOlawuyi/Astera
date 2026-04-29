@@ -67,5 +67,8 @@
     "*.{js,jsx,mjs,json,css,md}": [
       "npx prettier --write"
     ]
+  },
+  "overrides": {
+    "serialize-javascript": "7.0.5"
   }
 }

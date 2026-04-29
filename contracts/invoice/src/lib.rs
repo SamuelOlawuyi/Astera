@@ -259,18 +259,11 @@ fn is_valid_metadata_uri(_env: &Env, uri: &String) -> bool {
     if uri.len() == 0 || uri.len() > MAX_METADATA_URI_LEN {
         return false;
     }
-    true // Stubbed to allow build
-fn is_valid_metadata_uri(env: &Env, uri: &String) -> bool {
-    // Soroban SDK 22.x removed `String::to_bytes()`. For this lightweight
-    // URI-prefix validation, convert to a host string and validate its
-    // ASCII prefix.
+    // Minimal validation: enforce max length and require a safe URI prefix.
+    // We avoid heavy parsing in the contract and keep this purely defensive.
     let s = uri.to_string();
     let bytes = s.as_bytes();
     let len = bytes.len();
-
-    if len == 0 || len > MAX_METADATA_URI_LEN as usize {
-        return false;
-    }
 
     let ipfs = b"ipfs://";
     let ar = b"ar://";

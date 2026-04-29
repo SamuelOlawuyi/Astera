@@ -93,6 +93,8 @@ pub enum PoolError {
     TokenHasPendingWithdrawals = 29,
     // #233
     ConcentrationLimitExceeded = 30,
+    // #275: utilization guardrails
+    UtilizationLimitExceeded = 33,
     // #227 / #222
     YieldProposalNotFound = 31,
     YieldChangeNotReady = 32,
@@ -104,8 +106,9 @@ const DEFAULT_YIELD_BPS: u32 = 800;
 const DEFAULT_FACTORING_FEE_BPS: u32 = 0;
 const BPS_DENOM: u32 = 10_000;
 const SECS_PER_YEAR: u64 = 31_536_000;
-// #275: default max utilization — 95% (9_500 bps)
-const DEFAULT_MAX_UTILIZATION_BPS: u32 = 9_500;
+// #275: default max utilization — disabled (10_000 bps = 100%).
+// Many flows legitimately deploy 100% of available liquidity.
+const DEFAULT_MAX_UTILIZATION_BPS: u32 = 10_000;
 // #275: warning threshold — 80% (8_000 bps)
 const DEFAULT_UTILIZATION_WARNING_BPS: u32 = 8_000;
 /// Default collateral threshold: invoices >= 10,000 USDC (7 decimals) require collateral.
@@ -163,6 +166,9 @@ pub struct PoolConfig {
     // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
     pub max_single_withdrawal_bps: u32,
     pub withdrawal_cooldown_secs: u64,
+    // #275: pool utilization guardrails (bps)
+    pub max_utilization_bps: u32,
+    pub utilization_warning_bps: u32,
 }
 
 #[contracttype]
@@ -608,6 +614,9 @@ impl FundingPool {
             // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
             max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
             withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
+            // #275: utilization guardrails
+            max_utilization_bps: DEFAULT_MAX_UTILIZATION_BPS,
+            utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -1843,7 +1852,7 @@ impl FundingPool {
 
     /// Direct yield setter (single-step, subject to cooldown and max-step guards).
     /// Used in tests and for small adjustments that don't require the full timelock flow.
-    pub fn set_yield(env: Env, admin: Address, new_yield_bps: u32) -> PoolResult<()> {
+    pub fn set_yield(env: Env, admin: Address, new_yield_bps: u32) -> Result<(), PoolError> {
         admin.require_auth();
         bump_instance(&env);
         Self::require_not_paused(&env);
@@ -2469,6 +2478,36 @@ impl FundingPool {
             .instance()
             .get(&DataKey::TokenTotals(token))
             .unwrap_or_default()
+    }
+
+    /// #275: returns utilization for a token in basis points (0-10_000).
+    pub fn get_utilization(env: Env, token: Address) -> u32 {
+        let tt = Self::get_token_totals(env, token);
+        if tt.pool_value <= 0 {
+            return 0;
+        }
+        ((tt.total_deployed as u128 * 10_000u128) / tt.pool_value as u128) as u32
+    }
+
+    /// #275: admin setter for max utilization (bps).
+    pub fn set_max_utilization(env: Env, admin: Address, max_bps: u32) -> Result<(), PoolError> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin)?;
+        if max_bps > 10_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        config.max_utilization_bps = max_bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("max_util")), max_bps);
+        Ok(())
     }
     pub fn get_funded_invoice(env: Env, invoice_id: u64) -> Option<FundedInvoice> {
         env.storage()
@@ -4482,7 +4521,9 @@ mod test {
         client.deposit(&investor, &usdc_id, &10_000);
 
         // Set max utilization to 50%
-        client.set_max_utilization(&admin, &5_000u32).unwrap();
+        client
+            .try_set_max_utilization(&admin, &5_000u32)
+            .unwrap();
 
         // Fund 5000 (50%) — should succeed exactly at limit
         client.fund_invoice(
