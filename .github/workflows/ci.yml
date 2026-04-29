@@ -129,12 +129,20 @@ jobs:
           # Ensure Next's native SWC binding is present on Linux.
           NEXT_VERSION=$(node -p "require('./node_modules/next/package.json').version")
           echo "next=${NEXT_VERSION}"
-          node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok')" || \
-            (npm i --no-save "@next/swc-linux-x64-gnu@${NEXT_VERSION}" && node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok after fallback')")
+          if node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok')"; then
+            echo "next swc ok"
+          else
+            npm i --no-save "@next/swc-linux-x64-gnu@${NEXT_VERSION}"
+            node -e "require('@next/swc-linux-x64-gnu'); console.log('next swc ok after fallback')"
+          fi
 
           # Ensure Parcel watcher native binding is present (some tooling relies on it).
-          node -e "require('@parcel/watcher'); console.log('parcel watcher ok')" || \
-            (npm i --no-save @parcel/watcher-linux-x64-glibc@2.5.6 && node -e "require('@parcel/watcher'); console.log('parcel watcher ok after fallback')")
+          if node -e "require('@parcel/watcher'); console.log('parcel watcher ok')"; then
+            echo "parcel watcher ok"
+          else
+            npm i --no-save @parcel/watcher-linux-x64-glibc@2.5.6
+            node -e "require('@parcel/watcher'); console.log('parcel watcher ok after fallback')"
+          fi
 
       - name: Run ESLint
         run: npm run lint
