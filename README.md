@@ -50,6 +50,7 @@ Start with the guide that matches how you want to work:
 - [Smart Contract Interaction Guide](docs/interacting-with-contracts.md)
 
 ### Rapid Local Development (Docker Compose)
+
 We provide a Docker Compose workflow for the Stellar local network, the Next.js
 frontend, a contracts development shell, mock services, and the optional local
 indexer.
@@ -57,7 +58,9 @@ indexer.
 ```bash
 docker compose up --build
 ```
+
 After the stack is ready:
+
 - **Frontend** is available at http://localhost:3000
 - **Stellar Horizon/RPC** is available at http://localhost:8000
 - **Mock Services** are available at http://localhost:4000
@@ -255,4 +258,3 @@ To apply, in GitHub: **Settings → Branches → Branch protection rules → Add
 - **Reward:** $10
 - **Source:** GitHub-Paid
 - **Date:** 2026-04-27
-

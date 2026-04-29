@@ -24,6 +24,7 @@ Test the new WASM without any network calls:
 ```
 
 This will:
+
 - Build the latest WASM (if not already built)
 - Run all integration tests
 - Generate a report with no breaking changes
@@ -37,6 +38,7 @@ cat .upgrade-dry-run/upgrade-report-standalone-*.md | less
 ```
 
 **Key sections to review:**
+
 - ✅ **API Changes**: Are all entry points backward compatible?
 - ✅ **Storage Schema**: Are persistent storage keys unchanged?
 - ✅ **Test Results**: Do all integration tests pass?
@@ -49,37 +51,41 @@ cat .upgrade-dry-run/upgrade-report-standalone-*.md | less
 
 ### Arguments
 
-| Arg | Required | Options | Default |
-|-----|----------|---------|---------|
-| `contract` | No | `invoice`, `pool`, `credit`, `share`, `governance`, `all` | `all` |
+| Arg        | Required | Options                                                   | Default |
+| ---------- | -------- | --------------------------------------------------------- | ------- |
+| `contract` | No       | `invoice`, `pool`, `credit`, `share`, `governance`, `all` | `all`   |
 
 ### Options
 
-| Flag | Value | Purpose |
-|------|-------|---------|
-| `--wasm <path>` | File path | Test a pre-built WASM instead of rebuilding |
-| `--network` | `standalone`, `testnet`, `mainnet` | Which network to target (affects report) |
-| `--snapshot` | (flag) | For testnet: restore state from snapshot after test |
-| `--verbose` | (flag) | Print full state snapshots and test logs |
+| Flag            | Value                              | Purpose                                             |
+| --------------- | ---------------------------------- | --------------------------------------------------- |
+| `--wasm <path>` | File path                          | Test a pre-built WASM instead of rebuilding         |
+| `--network`     | `standalone`, `testnet`, `mainnet` | Which network to target (affects report)            |
+| `--snapshot`    | (flag)                             | For testnet: restore state from snapshot after test |
+| `--verbose`     | (flag)                             | Print full state snapshots and test logs            |
 
 ### Examples
 
 **Test all contracts locally:**
+
 ```bash
 ./scripts/upgrade-dry-run.sh all
 ```
 
 **Test pool contract with specific WASM:**
+
 ```bash
 ./scripts/upgrade-dry-run.sh pool --wasm ./my-pool-build.wasm --verbose
 ```
 
 **Test for testnet deployment:**
+
 ```bash
 ./scripts/upgrade-dry-run.sh pool --network testnet
 ```
 
 **Test a feature branch before opening PR:**
+
 ```bash
 git stash           # save local changes
 git checkout feat/my-upgrade
@@ -119,7 +125,7 @@ Occurs when an existing entry point changes its signature:
 // BEFORE: pool.rs
 pub fn deposit(e: Env, investor: Address, usdc_address: Address, amount: i128) { ... }
 
-// AFTER: pool.rs  
+// AFTER: pool.rs
 pub fn deposit(e: Env, investor: Address, usdc_address: Address, amount: i128, memo: String) { ... }
 //                                                                                      ^^^^^^^^
 //                                                                                 NEW PARAMETER
@@ -145,7 +151,8 @@ persistent!(StorageKeys { Pools(Symbol) = true });  // RENAMED KEY
 
 **Impact**: New binary cannot read old investor positions; deposits become inaccessible.
 
-**Detection**: 
+**Detection**:
+
 - "Key not found" errors in post-upgrade state snapshots
 - Storage analysis reports "REMOVED" keys without migration
 
@@ -157,7 +164,7 @@ Examples of changes the tool confirms as safe:
 ✅ **New validations** — stricter input checks that don't affect API  
 ✅ **Algorithm improvements** — yield calculation optimized but same results  
 ✅ **New entry points** — additional functions added; old ones unchanged  
-✅ **Lazy storage migration** — old keys readable; transparent to callers  
+✅ **Lazy storage migration** — old keys readable; transparent to callers
 
 ## Dry-Run Workflow for Production Upgrades
 
@@ -246,6 +253,7 @@ The upgrade dry-run is **automatically part of PR checks** via GitHub Actions:
 ```
 
 **PR behavior**:
+
 - ✅ GREEN: All tests pass, no breaking changes → auto-merge eligible
 - ❌ RED: Tests fail or breaking changes detected → requires fixes
 
@@ -256,7 +264,9 @@ The upgrade dry-run is **automatically part of PR checks** via GitHub Actions:
 **Cause**: Soroban contract code has compilation errors.
 
 **Solutions**:
+
 1. **Check for unmerged upstream changes**:
+
    ```bash
    git fetch upstream
    git rebase upstream/main
@@ -275,11 +285,13 @@ The upgrade dry-run is **automatically part of PR checks** via GitHub Actions:
    ```
 
 This helps identify if the build issue is in your changes or pre-existing.
+
 1. **Syntax error in Rust** → Fix the compilation issue
 2. **Breaking API change** → Test was expecting old function signature
 3. **Storage migration missing** → New keys can't read old data
 
 **Solution**:
+
 ```bash
 ./scripts/upgrade-dry-run.sh all --verbose  # See full error details
 cargo test -r --test integration_tests      # Run tests directly
@@ -291,7 +303,9 @@ cargo test -r --test integration_tests      # Run tests directly
 **Cause**: Compiled binary is > 200 KB (Soroban size limit)
 
 **Solutions**:
+
 1. **Strip debug symbols**:
+
    ```bash
    cargo build --target wasm32-unknown-unknown --release
    wasm-opt target/wasm32-unknown-unknown/release/pool.wasm -o pool-opt.wasm -O4
@@ -311,6 +325,7 @@ See [Gas Optimizations Guide](./gas-optimizations.md) for more.
 **Cause**: Tool uses templates for snapshot (safe for dry-run, not complete state)
 
 **Solution**:
+
 - On testnet with actual contracts, extracting real state is possible
 - For now, verify manually with:
   ```bash
