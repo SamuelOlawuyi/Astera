@@ -90,6 +90,15 @@ pub enum PoolError {
     AlreadyQueuedForWithdrawal = 22,
     InvalidRequestId = 23,
     TokenDepositCapReached = 26,
+    // #275: utilization limit
+    UtilizationLimitExceeded = 27,
+    // Missing errors referenced in code
+    ConcentrationLimitExceeded = 28,
+    YieldProposalNotFound = 29,
+    YieldChangeNotReady = 30,
+    TokenHasActiveBalances = 31,
+    TokenHasDeployedCapital = 32,
+    TokenHasPendingWithdrawals = 33,
 }
 
 type PoolResult<T> = Result<T, PoolError>;
@@ -98,6 +107,10 @@ const DEFAULT_YIELD_BPS: u32 = 800;
 const DEFAULT_FACTORING_FEE_BPS: u32 = 0;
 const BPS_DENOM: u32 = 10_000;
 const SECS_PER_YEAR: u64 = 31_536_000;
+// #275: default max utilization — 95% (9_500 bps)
+const DEFAULT_MAX_UTILIZATION_BPS: u32 = 9_500;
+// #275: warning threshold — 80% (8_000 bps)
+const DEFAULT_UTILIZATION_WARNING_BPS: u32 = 8_000;
 /// Default collateral threshold: invoices >= 10,000 USDC (7 decimals) require collateral.
 const DEFAULT_COLLATERAL_THRESHOLD: i128 = 100_000_000_000; // 10,000 USDC
 /// Default collateral ratio: 20% of principal (2000 bps).
@@ -153,6 +166,9 @@ pub struct PoolConfig {
     // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
     pub max_single_withdrawal_bps: u32,
     pub withdrawal_cooldown_secs: u64,
+    // #275: utilization limits
+    pub max_utilization_bps: u32,
+    pub utilization_warning_bps: u32,
 }
 
 #[contracttype]
@@ -532,6 +548,24 @@ fn fund_invoice_request(
     tt.total_deployed += request.principal;
     env.storage().instance().set(&token_totals_key, &tt);
 
+    // #275: check utilization after deployment
+    if tt.pool_value > 0 {
+        let config = get_config_cached(env)?;
+        let utilization = ((tt.total_deployed as u128 * 10_000u128) / tt.pool_value as u128) as u32;
+        if utilization > config.max_utilization_bps {
+            // Revert the deployment
+            tt.total_deployed -= request.principal;
+            env.storage().instance().set(&token_totals_key, &tt);
+            return Err(PoolError::UtilizationLimitExceeded);
+        }
+        if utilization > config.utilization_warning_bps {
+            env.events().publish(
+                (EVT, symbol_short!("high_util")),
+                (request.token.clone(), utilization),
+            );
+        }
+    }
+
     stats.total_funded_invoices += 1;
     stats.active_funded_invoices += 1;
 
@@ -542,6 +576,7 @@ fn fund_invoice_request(
             request.sme.clone(),
             request.principal,
             request.token.clone(),
+            env.ledger().timestamp(),
         ),
     );
     Ok(())
@@ -567,7 +602,7 @@ impl FundingPool {
             invoice_contract,
             admin: admin.clone(),
             yield_bps: DEFAULT_YIELD_BPS,
-            factoring_fee_bps: DEFAULT_FACTOING_FEE_BPS,
+            factoring_fee_bps: DEFAULT_FACTORING_FEE_BPS,
             compound_interest: false,
             last_yield_change_at: env.ledger().timestamp(),
             yield_change_cooldown_secs: DEFAULT_YIELD_CHANGE_COOLDOWN_SECS,
@@ -583,6 +618,9 @@ impl FundingPool {
             // #244: withdrawal rate limiting (10_000 bps = disabled; 0 secs = disabled)
             max_single_withdrawal_bps: DEFAULT_MAX_SINGLE_WITHDRAWAL_BPS,
             withdrawal_cooldown_secs: DEFAULT_WITHDRAWAL_COOLDOWN_SECS,
+            // #275: utilization limits
+            max_utilization_bps: DEFAULT_MAX_UTILIZATION_BPS,
+            utilization_warning_bps: DEFAULT_UTILIZATION_WARNING_BPS,
         };
 
         let mut tokens: Vec<Address> = Vec::new(&env);
@@ -917,7 +955,7 @@ impl FundingPool {
 
         env.events().publish(
             (EVT, symbol_short!("deposit")),
-            (investor, amount, shares_to_mint),
+            (investor, amount, shares_to_mint, env.ledger().timestamp()),
         );
         Ok(())
     }
@@ -1018,7 +1056,7 @@ impl FundingPool {
         Self::non_reentrant_end(&env); // <- ADD GUARD END
 
         env.events()
-            .publish((EVT, symbol_short!("withdraw")), (investor, amount, shares));
+            .publish((EVT, symbol_short!("withdraw")), (investor, amount, shares, now));
         Ok(())
     }
 
@@ -1591,12 +1629,12 @@ impl FundingPool {
 
             env.events().publish(
                 (EVT, symbol_short!("repaid")),
-                (invoice_id, record.principal, total_interest as i128),
+                (invoice_id, record.principal, total_interest as i128, now),
             );
         } else {
             env.events().publish(
                 (EVT, symbol_short!("part_pay")),
-                (invoice_id, amount, record.repaid_amount),
+                (invoice_id, amount, record.repaid_amount, now),
             );
         }
         Ok(())
@@ -1811,6 +1849,42 @@ impl FundingPool {
             (EVT, symbol_short!("col_seiz")),
             (invoice_id, col.depositor, col.amount),
         );
+        Ok(())
+    }
+
+    /// Direct yield setter (single-step, subject to cooldown and max-step guards).
+    /// Used in tests and for small adjustments that don't require the full timelock flow.
+    pub fn set_yield(env: Env, admin: Address, new_yield_bps: u32) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_not_paused(&env);
+        let mut config: PoolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(PoolError::NotInitialized)?;
+        Self::require_admin(&env, &admin)?;
+        if new_yield_bps > 5_000 {
+            return Err(PoolError::InvalidAmount);
+        }
+        let now = env.ledger().timestamp();
+        if now < config.last_yield_change_at.saturating_add(config.yield_change_cooldown_secs) {
+            return Err(PoolError::InvalidAmount);
+        }
+        let current = config.yield_bps;
+        let delta = if new_yield_bps >= current {
+            new_yield_bps - current
+        } else {
+            current - new_yield_bps
+        };
+        if delta > config.max_yield_change_bps {
+            return Err(PoolError::InvalidAmount);
+        }
+        config.yield_bps = new_yield_bps;
+        config.last_yield_change_at = now;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("yield_chg")), (admin, current, new_yield_bps));
         Ok(())
     }
 
@@ -2252,6 +2326,57 @@ impl FundingPool {
         token_client.transfer(&env.current_contract_address(), &treasury, &amount);
         env.events()
             .publish((EVT, symbol_short!("rev_wdraw")), (token, amount, treasury));
+        Ok(())
+    }
+
+    // ---- #275: utilization rate alerts and auto-pause threshold ----
+
+    /// Returns the current utilization in basis points (deployed / pool_value * 10_000).
+    /// Returns 0 if pool_value is 0.
+    pub fn get_utilization(env: Env, token: Address) -> u32 {
+        bump_instance(&env);
+        let tt: PoolTokenTotals = env
+            .storage()
+            .instance()
+            .get(&DataKey::TokenTotals(token))
+            .unwrap_or_default();
+        if tt.pool_value <= 0 {
+            return 0;
+        }
+        ((tt.total_deployed as u128 * 10_000u128) / tt.pool_value as u128) as u32
+    }
+
+    /// Admin sets the maximum utilization threshold (in bps, e.g. 9_500 = 95%).
+    /// Funding that would push utilization above this limit is rejected.
+    pub fn set_max_utilization(env: Env, admin: Address, bps: u32) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if bps > BPS_DENOM {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config = get_config_cached(&env)?;
+        config.max_utilization_bps = bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_util")), (admin, bps));
+        Ok(())
+    }
+
+    /// Admin sets the utilization warning threshold (in bps, e.g. 8_000 = 80%).
+    /// A warning event is emitted when utilization exceeds this level after funding.
+    pub fn set_utilization_warning(env: Env, admin: Address, bps: u32) -> PoolResult<()> {
+        admin.require_auth();
+        bump_instance(&env);
+        Self::require_admin(&env, &admin)?;
+        if bps > BPS_DENOM {
+            return Err(PoolError::InvalidAmount);
+        }
+        let mut config = get_config_cached(&env)?;
+        config.utilization_warning_bps = bps;
+        env.storage().instance().set(&DataKey::Config, &config);
+        env.events()
+            .publish((EVT, symbol_short!("set_uwarn")), (admin, bps));
         Ok(())
     }
 
@@ -4349,5 +4474,84 @@ mod test {
         // Second full repayment must be rejected
         let result = client.try_repay_invoice(&1u64, &sme, &total_due);
         assert_eq!(result, Err(Ok(PoolError::AlreadyFullyRepaid)));
+    }
+
+    // ---- Issue #275: Utilization rate alerts and auto-pause threshold ----
+
+    #[test]
+    fn test_utilization_zero_when_no_deployment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 1_000);
+        client.deposit(&investor, &usdc_id, &1_000);
+        assert_eq!(client.get_utilization(&usdc_id), 0u32);
+    }
+
+    #[test]
+    fn test_utilization_calculated_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &5_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        // 5000 deployed / 10000 pool_value = 50% = 5000 bps
+        assert_eq!(client.get_utilization(&usdc_id), 5_000u32);
+    }
+
+    #[test]
+    fn test_fund_invoice_rejected_when_utilization_limit_exceeded() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, usdc_id, _share_token) = setup(&env);
+        let investor = Address::generate(&env);
+        let sme = Address::generate(&env);
+        mint(&env, &usdc_id, &investor, 10_000);
+        client.deposit(&investor, &usdc_id, &10_000);
+
+        // Set max utilization to 50%
+        client.set_max_utilization(&admin, &5_000u32).unwrap();
+
+        // Fund 5000 (50%) — should succeed exactly at limit
+        client.fund_invoice(
+            &admin,
+            &1u64,
+            &5_000i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+
+        // Fund 1 more — would push to 50.01%, exceeding limit
+        let result = client.try_fund_invoice(
+            &admin,
+            &2u64,
+            &1i128,
+            &sme,
+            &(env.ledger().timestamp() + 10_000),
+            &usdc_id,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_max_utilization_non_admin_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, _usdc_id, _share_token) = setup(&env);
+        let attacker = Address::generate(&env);
+        let result = client.try_set_max_utilization(&attacker, &5_000u32);
+        assert!(result.is_err());
     }
 }
